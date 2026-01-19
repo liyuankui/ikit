@@ -143,11 +143,15 @@ git add . && git commit -m "Add: description"
 git --no-pager log --oneline -10
 ```
 
-**⚠️ Author Identity Check**: Before modifying commit history (filter-branch, rebase), verify author config:
+**⚠️ Author Identity Check**: For new repos (< 10 commits), confirm identity before committing:
 ```bash
-# Check current config vs existing commits
-git config user.name && git config user.email
-git log --format="%h %an <%ae>" -5
+# Check if this is a new repo
+COMMIT_COUNT=$(git rev-list --count HEAD)
+if [ "$COMMIT_COUNT" -lt 10 ]; then
+    echo "Current: $(git config user.name) <$(git config user.email)>"
+    # Ask user which identity to use
+    # Configure local: git config --local user.email "..."
+fi
 ```
 
 **Commit message patterns**:
