@@ -143,6 +143,13 @@ git add . && git commit -m "Add: description"
 git --no-pager log --oneline -10
 ```
 
+**⚠️ Author Identity Check**: Before modifying commit history (filter-branch, rebase), verify author config:
+```bash
+# Check current config vs existing commits
+git config user.name && git config user.email
+git log --format="%h %an <%ae>" -5
+```
+
 **Commit message patterns**:
 - `Log: [description]` - Record events, conversations, sessions
 - `Add: [description]` - Add new content, prompts, features
