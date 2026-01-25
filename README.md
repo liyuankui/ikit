@@ -2,7 +2,7 @@
 
 `iKit` is a high-performance, native macOS CLI designed specifically for AI Agents. It unifies the management of Apple's core productivity apps.
 
-**Version**: v2.6.0 (Dual-Track + Aggressive Gating)
+**Version**: v2.7.0 (Daemon Reliability)
 
 ---
 
@@ -19,12 +19,14 @@
 - **Batch OCR**: 批量识别截图文字
 - **智能搜索**: 按截图/收藏筛选
 
-### 🎙 Meet (会议助手) [BETA]
+### 🎙 Meet (会议助手)
 - **双轨录制**: 麦克风 + 系统音频独立录制
 - **Aggressive Gating**: 自动消除回声，避免重复转录
 - **说话人分离**: 自动区分 Local/Remote 说话人
 - **本地转写**: 集成 FunASR，完全离线处理
-- **Daemon**: 全天候后台录音（每 15 分钟切片）
+- **后台模式**: 可靠的后台录音，支持心跳检测和优雅退出
+- **状态管理**: `status`/`stop` 命令管理 daemon 生命周期
+- **预检查**: 启动前检查磁盘空间、FunASR 可用性、权限
 
 ---
 
@@ -43,9 +45,19 @@ cp .build/release/ikit ~/.local/bin/ikit
 {
   "notes_root": "~/Notebooks/AppleNotes",
   "python_path": "/path/to/python",
-  "transcribe_script": "/path/to/transcribe.py"
+  "transcribe_script": "/path/to/transcribe.py",
+  "meet": {
+    "default_interval": "15m",
+    "default_mode": "both",
+    "auto_transcribe": true
+  }
 }
 ```
+
+**Meet 配置说明**：
+- `default_interval`: 默认录音片段时长（格式：`60s`, `5m`, `1h`）
+- `default_mode`: 录音模式（`both`, `mic-only`, `system-only`）
+- `auto_transcribe`: 是否自动转录录音文件
 
 ### 依赖安装
 ```bash
@@ -95,6 +107,23 @@ git commit --no-verify -m "message"
 ## Meet 会议助手使用
 
 ### 1. 启动 Daemon
+
+#### 后台模式（推荐）
+```bash
+# 后台运行 + 新 interval 格式
+ikit meet daemon ~/recordings --background --interval=15m
+
+# 检查状态
+ikit meet status
+# ✅ Daemon running (PID: 12345)
+# 💚 Heartbeat: 5s ago
+# 📁 Output: /Users/xxx/recordings/2026-01-25
+
+# 停止 daemon（优雅退出，保存当前录音）
+ikit meet stop
+```
+
+#### 录制模式
 ```bash
 # 默认模式（麦克风 + 系统音频）
 ikit meet daemon ~/recordings
@@ -105,6 +134,24 @@ ikit meet daemon --system-only ~/recordings
 # 只录麦克风
 ikit meet daemon --mic-only ~/recordings
 ```
+
+#### 新 Interval 格式
+- `60s` - 60 秒
+- `5m` - 5 分钟
+- `1h` - 1 小时
+
+**旧格式已弃用**: `--interval=60` (分钟) 将在 v3.0.0 移除
+
+#### 启动前预检查
+Daemon 启动时会自动运行：
+- ✅ 磁盘空间检查（需要至少 5GB）
+- ✅ FunASR 可用性检查
+- ✅ 输出目录权限检查
+
+#### 心跳文件
+Daemon 每 10 秒更新一次 `.heartbeat` 文件：
+- 💚 Heartbeat: 5s ago（正常）
+- 💔 Heartbeat stale: 45s ago（进程可能卡死）
 
 ### 2. 输出文件结构
 ```
@@ -128,6 +175,47 @@ python scripts/transcribe.py \
     {"text": "请继续", "speaker": "Local", "start": 1500, "end": 2500}
   ]
 }
+```
+
+### 4. 会议纪要生成
+
+#### 说话人映射管理
+```bash
+# 映射说话人 ID 到真实姓名
+python scripts/speaker_mapper.py set 2026-01-25 afternoon 0 "张三" \
+  --context "产品经理，负责需求讨论"
+
+# 查看映射
+python scripts/speaker_mapper.py get 2026-01-25 afternoon 0
+
+# 列出所有会议的映射
+python scripts/speaker_mapper.py list
+```
+
+#### 生成会议纪要
+```bash
+# 生成带说话人识别的会议纪要
+python scripts/generate_meeting_summary.py \
+  ~/recordings/2026-01-25 \
+  --date 2026-01-25 \
+  --session afternoon \
+  --interactive
+
+# 输出包含：
+# - 执行摘要
+# - 讨论要点（带说话人）
+# - 决策记录（带提议者）
+# - 行动项（带负责人）
+# - 时间线
+```
+
+### 5. OCR 工具
+```bash
+# 使用 Vision 框架进行 OCR
+swift scripts/ocr_images.swift ~/recordings/2026-01-25/*.png
+
+# 简化的 Python OCR 封装
+python scripts/ocr_simple.py ~/recordings/2026-01-25/screenshot.png
 ```
 
 ---
