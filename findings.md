@@ -90,7 +90,8 @@ if intervalStr.hasSuffix("m") || intervalStr.hasSuffix("M") {
 
 | Issue | Resolution |
 |-------|------------|
-| | |
+| FunASR transcribe 首次运行卡住 | ✅ 已修复 v2.8.1 - 添加进度提示和日志转发 |
+| meet process 输出文件未创建 | ✅ 已修复 v2.8.1 - 添加目录创建和文件验证 |
 
 ## Resources
 

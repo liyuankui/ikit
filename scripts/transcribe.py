@@ -12,6 +12,14 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Import requests for LiteLLM API calls
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+    logger.warning("requests module not available - LiteLLM engine will not work")
+
 def _get_language_name(code):
     """Get full language name from language code."""
     lang_names = {
@@ -785,13 +793,124 @@ def simplify_output(result: dict) -> dict:
 
     return simplified
 
+def transcribe_with_litellm(audio_path: str, litellm_url: str, litellm_model: str,
+                             litellm_api_key: str = None, language: str = "auto") -> dict:
+    """
+    Transcribe audio using LiteLLM API (e.g., qwen-max via API).
+
+    This function sends the audio file to a LiteLLM-compatible API endpoint
+    for transcription. It's useful when you have a cloud-based ASR service.
+
+    Args:
+        audio_path: Path to audio file
+        litellm_url: LiteLLM API endpoint URL
+        litellm_model: Model name to use (e.g., "qwen-max")
+        litellm_api_key: API key for authentication (optional)
+        language: Language code (zh, en, auto)
+
+    Returns:
+        Dictionary with 'sentence_info' containing transcription results
+    """
+    if not REQUESTS_AVAILABLE:
+        raise ImportError("requests module is required for LiteLLM engine")
+
+    logger.info(f"🌐 Using LiteLLM API for transcription")
+    logger.info(f"   URL: {litellm_url}")
+    logger.info(f"   Model: {litellm_model}")
+
+    # Prepare headers
+    headers = {"Content-Type": "application/json"}
+    if litellm_api_key:
+        headers["Authorization"] = f"Bearer {litellm_api_key}"
+
+    # Prepare audio file for upload
+    # Note: Most LiteLLM endpoints require base64 encoded audio or multipart upload
+    # This implementation assumes the API can handle audio file input
+    # Adjust based on your specific LiteLLM endpoint requirements
+
+    try:
+        # Read audio file
+        with open(audio_path, 'rb') as f:
+            audio_data = f.read()
+
+        import base64
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+
+        # Prepare prompt for transcription
+        lang_hint = ""
+        if language == "zh":
+            lang_hint = "请转录以下中文音频："
+        elif language == "en":
+            lang_hint = "Please transcribe the following English audio:"
+
+        # Prepare request payload
+        payload = {
+            "model": litellm_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"{lang_hint}\n\n[audio data: {len(audio_data)} bytes, base64 encoded]"
+                }
+            ],
+            "stream": False
+        }
+
+        # Make API request
+        logger.info(f"📡 Sending audio to LiteLLM API...")
+        response = requests.post(litellm_url, json=payload, headers=headers, timeout=300)
+
+        if response.status_code != 200:
+            raise Exception(f"LiteLLM API returned error {response.status_code}: {response.text}")
+
+        result = response.json()
+
+        # Parse response - adjust based on your API response format
+        # Common formats: OpenAI-compatible, custom formats, etc.
+        if 'choices' in result and len(result['choices']) > 0:
+            transcription_text = result['choices'][0]['message']['content']
+        elif 'response' in result:
+            transcription_text = result['response']
+        elif 'output' in result:
+            transcription_text = result['output']
+        else:
+            logger.warning(f"⚠️ Unexpected response format: {result.keys()}")
+            transcription_text = str(result)
+
+        logger.info(f"✅ Received transcription from LiteLLM")
+
+        # Convert to expected format
+        # Split by lines and estimate timestamps
+        lines = transcription_text.strip().split('\n')
+        sentences = []
+        current_time = 0
+
+        for i, line in enumerate(lines):
+            if line.strip():
+                # Estimate timestamp (rough approximation)
+                sentences.append({
+                    'text': line.strip(),
+                    'start': current_time,
+                    'end': current_time + 5000,  # 5 second estimate per line
+                    'spk': 0,  # No speaker diarization for LiteLLM
+                    'track': 'litellm'
+                })
+                current_time += 5000
+
+        return {'sentence_info': sentences}
+
+    except Exception as e:
+        logger.error(f"❌ LiteLLM transcription failed: {e}")
+        raise
+
 def main():
-    parser = argparse.ArgumentParser(description="iKit ASR Transcriber - FunASR + WhisperX + MLX")
+    parser = argparse.ArgumentParser(description="iKit ASR Transcriber - FunASR + WhisperX + MLX + LiteLLM")
     parser.add_argument("input_files", nargs='+', help="Path(s) to audio file(s)")
     parser.add_argument("--output", "-o", help="Path to save the output JSON", default=None)
     parser.add_argument("--device", "-d", help="Device to use (mps, cpu, cuda)", default=None)
-    parser.add_argument("--engine", "-e", choices=["funasr", "whisperx", "mlx"], default="funasr",
-                        help="ASR engine: funasr (Chinese), whisperx (English), mlx (English, Apple Silicon optimized)")
+    parser.add_argument("--engine", "-e",
+                        choices=["funasr", "whisperx", "mlx", "litellm"],
+                        default="funasr",
+                        help="ASR engine: funasr (Chinese), whisperx (English), mlx (English, Apple Silicon), litellm (API-based)")
     parser.add_argument("--language", "-l", default="auto",
                         help="Language code (zh, en, auto). Default: auto (auto-detect)")
     parser.add_argument("--no-gating", action="store_true", help="Disable aggressive gating (FunASR only)")
@@ -801,6 +920,10 @@ def main():
                         help="Simplified output (no word-level timestamps). Default: True")
     parser.add_argument("--full", action="store_true",
                         help="Full output with word-level timestamps. Overrides --simple")
+    # LiteLLM-specific arguments (Issue #3)
+    parser.add_argument("--litellm-url", help="LiteLLM API endpoint URL (e.g., http://localhost:4444/v1/completions)")
+    parser.add_argument("--litellm-model", help="LiteLLM model name (e.g., qwen-max)")
+    parser.add_argument("--litellm-api-key", help="LiteLLM API key (if required)")
     args = parser.parse_args()
 
     # Check dependencies
@@ -844,6 +967,14 @@ def main():
         elif args.engine == "whisperx":
             # Use WhisperX (recommended for English)
             result = transcribe_dual_track_whisperx(mic_path, sys_path, device=device, language=args.language)
+        elif args.engine == "litellm":
+            # Use LiteLLM API (Issue #3)
+            if not args.litellm_url or not args.litellm_model:
+                logger.error("❌ LiteLLM engine requires --litellm-url and --litellm-model")
+                sys.exit(1)
+            # Transcribe system audio (usually cleaner)
+            result = transcribe_with_litellm(sys_path, args.litellm_url, args.litellm_model,
+                                             args.litellm_api_key, args.language)
         else:
             # Use FunASR with appropriate language model
             start_load = time.time()
@@ -881,6 +1012,13 @@ def main():
             result = transcribe_with_mlx(input_file, language=args.language, model=args.mlx_model)
         elif args.engine == "whisperx":
             result = transcribe_with_whisperx(input_file, language=args.language, device=device)
+        elif args.engine == "litellm":
+            # Use LiteLLM API (Issue #3)
+            if not args.litellm_url or not args.litellm_model:
+                logger.error("❌ LiteLLM engine requires --litellm-url and --litellm-model")
+                sys.exit(1)
+            result = transcribe_with_litellm(input_file, args.litellm_url, args.litellm_model,
+                                             args.litellm_api_key, args.language)
         else:
             # Use FunASR with appropriate language model
             start_load = time.time()

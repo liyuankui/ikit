@@ -295,6 +295,8 @@ struct MeetConfig: Codable {
   var default_interval: String?  // e.g., "15m", "1h"
   var default_mode: String?  // "both", "mic-only", "system-only"
   var auto_transcribe: Bool?  // Whether to auto-transcribe segments
+  var auto_summary: Bool?  // Whether to auto-generate meeting summary (default: true)
+  var transcribe_engine: String?  // "ollama" | "litellm" (default: "ollama")
 }
 
 struct Config: Codable {
@@ -334,7 +336,9 @@ class ConfigManager {
       meet: MeetConfig(
         default_interval: "15m",
         default_mode: "both",
-        auto_transcribe: true
+        auto_transcribe: true,
+        auto_summary: true,
+        transcribe_engine: "ollama"
       )
     )
     load()
@@ -374,6 +378,14 @@ class ConfigManager {
 
   func getMeetAutoTranscribe() -> Bool {
     return current.meet?.auto_transcribe ?? true
+  }
+
+  func getMeetAutoSummary() -> Bool {
+    return current.meet?.auto_summary ?? true
+  }
+
+  func getMeetTranscribeEngine() -> String {
+    return current.meet?.transcribe_engine ?? "ollama"
   }
 }
 
@@ -1196,14 +1208,40 @@ class MeetSession {
 
     let process = Process()
     process.executableURL = URL(fileURLWithPath: pythonPath)
-    process.arguments = [
+
+    // Get transcribe engine from config (Issue #3)
+    let transcribeEngine = ConfigManager.shared.getMeetTranscribeEngine()
+
+    // Build arguments based on engine
+    var args = [
       transcribeScript,
       "-o", transcriptPath.path,
-      "--engine", "mlx",
+      "--engine", transcribeEngine,
       "--language", "auto",
-      micPath.path,
-      sysPath.path,
     ]
+
+    // Add LiteLLM parameters if using litellm engine
+    if transcribeEngine == "litellm" {
+      if let litellmUrl = ConfigManager.shared.current.litellm_url {
+        args += ["--litellm-url", litellmUrl]
+      }
+      if let litellmModel = ConfigManager.shared.current.litellm_model {
+        args += ["--litellm-model", litellmModel]
+      }
+      if let litellmApiKey = ConfigManager.shared.current.litellm_api_key {
+        args += ["--litellm-api-key", litellmApiKey]
+      }
+    }
+
+    // Add audio files
+    if mode == .both || mode == .micOnly {
+      args.append(micPath.path)
+    }
+    if mode == .both || mode == .sysOnly {
+      args.append(sysPath.path)
+    }
+
+    process.arguments = args
 
     do {
       try process.run()
@@ -2161,6 +2199,12 @@ class Daemon {
 
   // Generate integrated summary from all segments
   private func generateIntegratedSummary(outputDir: String, configManager: ConfigManager) async {
+    // Check if auto-summary is disabled (Issue #2)
+    guard configManager.getMeetAutoSummary() else {
+      Logger.info("📋 Auto-summary disabled by config (meet.auto_summary = false)")
+      return
+    }
+
     let fm = FileManager.default
 
     // Find all JSON transcription files
@@ -4621,7 +4665,7 @@ class SecretaryTool {
 
 // MARK: - Main
 struct App {
-  static let VERSION = "2.8.1"
+  static let VERSION = "2.9.0"
 
   static func main() async {
     let args = CommandLine.arguments
@@ -4986,13 +5030,16 @@ struct App {
             }
           }
 
-          // Show deprecation warning for old format
+          // Reject deprecated bare number format (Issue #5)
           if usedDeprecatedFormat {
-            Logger.warn("⚠️  --interval=N (minutes) is deprecated")
-            Logger.warn(
-              "   Use --interval=<duration> instead (e.g., --interval=60s for 60 seconds, --interval=5m for 5 minutes)"
-            )
-            Logger.warn("   This will be removed in v3.0.0")
+            Logger.error("❌ Invalid interval format: --interval=N")
+            Logger.error("   Interval must include an explicit unit suffix:")
+            Logger.error("   • 60s  = 60 seconds (1 minute)")
+            Logger.error("   • 5m   = 5 minutes")
+            Logger.error("   • 1h   = 1 hour (60 minutes)")
+            Logger.error("")
+            Logger.error("   Example: ikit meet daemon ~/recordings --interval=5m --background")
+            exit(1)
           }
 
           // Validate interval
@@ -5031,6 +5078,14 @@ struct App {
 
           // Check for --background flag
           let backgroundMode = args.contains("--background")
+
+          // Warn if not using --background (Issue #4)
+          if !backgroundMode {
+            Logger.warn("⚠️  Running without --background flag")
+            Logger.warn("   Recording may stop if terminal closes or SIGHUP is received")
+            Logger.warn("   Use 'ikit meet daemon <outDir> --background' for reliable background recording")
+            print("")
+          }
 
           await Daemon(mode: mode, segmentMinutes: segmentMinutes, background: backgroundMode).run(
             outputDir: outputDir)
