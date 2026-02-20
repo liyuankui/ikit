@@ -8,6 +8,7 @@
 
 import json
 import re
+import time
 import requests
 import sys
 import os
@@ -15,6 +16,11 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, Counter
 from typing import Dict, List, Tuple
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAYS = [2, 4, 8]  # Exponential backoff: 2s, 4s, 8s
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}  # Status codes that trigger retry
 
 # 添加 scripts 目录到路径
 script_dir = Path(__file__).parent
@@ -412,28 +418,64 @@ class MeetingSummaryGenerator:
         return prompt
 
     def _call_llm(self, prompt: str, url: str, model: str) -> Tuple[str, bool]:
-        """调用 LLM 生成内容，返回 (结果, 是否成功)"""
-        try:
-            response = requests.post(
-                url,
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": False
-                },
-                timeout=180
-            )
-            result = response.json()
-            content = result.get("response", "")
+        """调用 LLM 生成内容，返回 (结果, 是否成功)
 
-            # 检查是否有效响应
-            if content and len(content) > 100 and not content.startswith("["):
-                return content, True
-            else:
-                return "", False
-        except Exception as e:
-            print(f"⚠️  LLM调用失败: {e}")
-            return "", False
+        Includes retry logic with exponential backoff for transient failures.
+        """
+        last_error = None
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = requests.post(
+                    url,
+                    json={
+                        "model": model,
+                        "prompt": prompt,
+                        "stream": False
+                    },
+                    timeout=180
+                )
+
+                # Check for retryable status codes
+                if response.status_code in RETRY_STATUS_CODES:
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_DELAYS[attempt]
+                        print(f"⚠️  LLM调用返回 {response.status_code}，{delay}秒后重试 (尝试 {attempt + 1}/{MAX_RETRIES})...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"⚠️  LLM调用失败: HTTP {response.status_code} (已重试 {MAX_RETRIES} 次)")
+                        return "", False
+
+                result = response.json()
+                content = result.get("response", "")
+
+                # 检查是否有效响应
+                if content and len(content) > 100 and not content.startswith("["):
+                    return content, True
+                else:
+                    return "", False
+
+            except requests.exceptions.Timeout:
+                last_error = "请求超时"
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    print(f"⚠️  LLM调用超时，{delay}秒后重试 (尝试 {attempt + 1}/{MAX_RETRIES})...")
+                    time.sleep(delay)
+                continue
+            except requests.exceptions.ConnectionError as e:
+                last_error = f"连接错误: {e}"
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAYS[attempt]
+                    print(f"⚠️  LLM连接失败，{delay}秒后重试 (尝试 {attempt + 1}/{MAX_RETRIES})...")
+                    time.sleep(delay)
+                continue
+            except Exception as e:
+                last_error = str(e)
+                break
+
+        print(f"⚠️  LLM调用失败: {last_error}")
+        return "", False
 
     def _format_output(self, speaker_analysis: Dict, timeline_summary: List[Dict], llm_summary: str, llm_success: bool) -> str:
         """格式化最终输出"""
