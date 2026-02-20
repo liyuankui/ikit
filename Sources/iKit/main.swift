@@ -2715,6 +2715,68 @@ class NotesBridge: NSObject {
     }
   }
 
+  /// Search notes by keyword using native AppleScript filter (fast)
+  func searchNotes(keyword: String, folderId: String? = nil) -> [(id: String, name: String, path: String, modDate: Date?)] {
+    let escapedKeyword = escape(keyword)
+    let script: String
+    if let fid = folderId {
+      script = """
+        tell application \"Notes\"
+            try
+                set targetFolder to folder id \"\(fid)\"
+                set matchingNotes to every note in targetFolder whose name contains \"\(escapedKeyword)\"
+                set resultList to {}
+                repeat with n in matchingNotes
+                    set nid to id of n
+                    set nname to name of n
+                    set d to modification date of n
+                    set dStr to (year of d as string) & "-" & (month of d as integer as string) & "-" & (day of d as string) & " " & (hours of d as string) & ":" & (minutes of d as string) & ":" & (seconds of d as string)
+                    set end of resultList to nid & \"|||\" & nname & \"|||\" & \"\(fid)\" & \"|||\" & dStr
+                end repeat
+                set AppleScript's text item delimiters to "###"
+                return resultList as string
+            on error
+                return ""
+            end try
+        end tell
+        """
+    } else {
+      script = """
+        tell application \"Notes\"
+            try
+                set matchingNotes to every note whose name contains \"\(escapedKeyword)\"
+                set resultList to {}
+                repeat with n in matchingNotes
+                    set nid to id of n
+                    set nname to name of n
+                    set d to modification date of n
+                    set dStr to (year of d as string) & "-" & (month of d as integer as string) & "-" & (day of d as string) & " " & (hours of d as string) & ":" & (minutes of d as string) & ":" & (seconds of d as string)
+
+                    set folderPath to "Unknown"
+                    try
+                        set currentFolder to container of n
+                        set folderPath to name of currentFolder
+                    end try
+
+                    set end of resultList to nid & \"|||\" & nname & \"|||\" & folderPath & \"|||\" & dStr
+                end repeat
+                set AppleScript's text item delimiters to "###"
+                return resultList as string
+            on error
+                return ""
+            end try
+        end tell
+        """
+    }
+    guard let out = executeAppleScript(script, timeout: 30), !out.isEmpty else { return [] }
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-M-d H:m:s"
+    return out.components(separatedBy: "###").filter { !$0.isEmpty }.compactMap { item in
+      let p = item.components(separatedBy: "|||")
+      return p.count >= 4 ? (p[0], p[1], p[2], f.date(from: p[3])) : nil
+    }
+  }
+
   func readNote(id: String) -> String? {
     executeAppleScript(
       "tell application \"Notes\" to get plaintext of note id \"\(id)\"", timeout: 5)
@@ -3090,20 +3152,15 @@ class NotesTool {
     }
   }
 
-  /// Search notes by keyword
+  /// Search notes by keyword (uses native AppleScript filter for speed)
   func search(keyword: String, folder: String? = nil, json: Bool = false) {
     Logger.info("🔍 Searching for: \(keyword)")
 
-    // Get all notes
-    var allNotes = bridge.listAllNotesSafe()
+    // Get folder ID if folder filter specified
+    let folderId = folder != nil ? findFolderId(path: folder!) : nil
 
-    // Filter by folder if specified
-    if let folderFilter = folder {
-      allNotes = allNotes.filter { $0.path.localizedCaseInsensitiveContains(folderFilter) }
-    }
-
-    // Filter by keyword in name (case-insensitive)
-    let matches = allNotes.filter { $0.name.localizedCaseInsensitiveContains(keyword) }
+    // Use native AppleScript search (fast, 30s timeout)
+    let matches = bridge.searchNotes(keyword: keyword, folderId: folderId)
 
     if matches.isEmpty {
       Logger.info("No notes found matching: \(keyword)")
