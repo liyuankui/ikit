@@ -73,7 +73,8 @@ class TranscriptionManager {
           self?.removeProcess(pid)
         }
       }
-      DispatchQueue.global().asyncAfter(deadline: .now() + maxTranscriptionTime, execute: timeoutWork)
+      DispatchQueue.global().asyncAfter(
+        deadline: .now() + maxTranscriptionTime, execute: timeoutWork)
 
       // Wait for completion
       task.waitUntilExit()
@@ -2488,6 +2489,48 @@ class NotesBridge: NSObject {
       of: qt, with: bs + qt)
   }
 
+  /// Convert Markdown to HTML using pandoc
+  private func convertMarkdownToHTML(_ markdown: String) -> String {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/pandoc")
+    // --strip-empty-paragraphs removes empty paragraphs
+    // Output is single-line HTML (no newlines) for AppleScript compatibility
+    task.arguments = ["--from=markdown", "--to=html", "--wrap=none"]
+
+    let inputPipe = Pipe()
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+
+    task.standardInput = inputPipe
+    task.standardOutput = outputPipe
+    task.standardError = errorPipe
+
+    do {
+      try task.run()
+
+      // Write markdown to stdin
+      if let data = markdown.data(using: .utf8) {
+        inputPipe.fileHandleForWriting.write(data)
+      }
+      try inputPipe.fileHandleForWriting.close()
+
+      task.waitUntilExit()
+
+      if task.terminationStatus == 0 {
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let html = String(data: outputData, encoding: .utf8) ?? markdown
+        // Remove newlines for AppleScript compatibility
+        return html.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "\r", with: "")
+      } else {
+        Logger.warn("⚠️  Pandoc conversion failed, using raw content")
+        return markdown
+      }
+    } catch {
+      Logger.warn("⚠️  Failed to run pandoc: \(error), using raw content")
+      return markdown
+    }
+  }
+
   func listAllNotesSafe() -> [(id: String, name: String, path: String, modDate: Date?)] {
     Logger.info("⏳ Fetching all notes from Apple Notes...")
     // 使用更快的方案：一次性获取所有笔记，而不是逐个调用
@@ -2716,7 +2759,9 @@ class NotesBridge: NSObject {
   }
 
   /// Search notes by keyword using native AppleScript filter (fast)
-  func searchNotes(keyword: String, folderId: String? = nil) -> [(id: String, name: String, path: String, modDate: Date?)] {
+  func searchNotes(keyword: String, folderId: String? = nil) -> [(
+    id: String, name: String, path: String, modDate: Date?
+  )] {
     let escapedKeyword = escape(keyword)
     let script: String
     if let fid = folderId {
@@ -2790,7 +2835,9 @@ class NotesBridge: NSObject {
 
   func createNote(name: String, folderId: String, content: String) -> String {
     let escName = escape(name)
-    let escContent = escape(content)
+    // Convert Markdown to HTML using pandoc
+    let htmlContent = convertMarkdownToHTML(content)
+    let escContent = escape(htmlContent)
     let script = """
       tell application \"Notes\"
           try
@@ -2807,8 +2854,9 @@ class NotesBridge: NSObject {
 
   func appendToNote(name: String, folderId: String, content: String) -> String {
     let escName = escape(name)
-    let bs = String(Character(UnicodeScalar(92)!))
-    let escContent = escape(content).replacingOccurrences(of: bs + "n", with: "<br>")
+    // Convert Markdown to HTML using pandoc
+    let htmlContent = convertMarkdownToHTML(content)
+    let escContent = escape(htmlContent)
     let script = """
       tell application \"Notes\"
           try
@@ -2825,8 +2873,9 @@ class NotesBridge: NSObject {
 
   func updateNote(name: String, folderId: String, content: String) -> String {
     let escName = escape(name)
-    let bs = String(Character(UnicodeScalar(92)!))
-    let escContent = escape(content).replacingOccurrences(of: bs + "n", with: "<br>")
+    // Convert Markdown to HTML using pandoc
+    let htmlContent = convertMarkdownToHTML(content)
+    let escContent = escape(htmlContent)
     let script = """
       tell application \"Notes\"
           try
@@ -2961,7 +3010,9 @@ class NotesTool {
 
   /// Find note name with fuzzy matching support
   /// Returns (exactName, shouldProceed) - exactName is the matched note name, shouldProceed indicates if operation should continue
-  func findNoteWithFuzzyMatch(title: String, folderId: String) -> (exactName: String?, message: String?) {
+  func findNoteWithFuzzyMatch(title: String, folderId: String) -> (
+    exactName: String?, message: String?
+  ) {
     // First, get all notes in the folder
     let notes = bridge.listNotesMetadata(inFolderId: folderId)
 
@@ -3132,7 +3183,7 @@ class NotesTool {
       let dicts = notes.map { (name, modDate) -> [String: Any] in
         return [
           "name": name,
-          "modificationDate": modDate != nil ? f.string(from: modDate!) : NSNull()
+          "modificationDate": modDate != nil ? f.string(from: modDate!) : NSNull(),
         ]
       }
       if let data = try? JSONSerialization.data(withJSONObject: dicts, options: [.prettyPrinted]),
@@ -3174,7 +3225,7 @@ class NotesTool {
           "id": id,
           "name": name,
           "folder": path,
-          "modificationDate": modDate != nil ? f.string(from: modDate!) : NSNull()
+          "modificationDate": modDate != nil ? f.string(from: modDate!) : NSNull(),
         ]
       }
       if let data = try? JSONSerialization.data(withJSONObject: dicts, options: [.prettyPrinted]),
@@ -5484,7 +5535,8 @@ struct App {
           if !backgroundMode {
             Logger.warn("⚠️  Running without --background flag")
             Logger.warn("   Recording may stop if terminal closes or SIGHUP is received")
-            Logger.warn("   Use 'ikit meet daemon <outDir> --background' for reliable background recording")
+            Logger.warn(
+              "   Use 'ikit meet daemon <outDir> --background' for reliable background recording")
             print("")
           }
 
