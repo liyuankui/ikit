@@ -10,6 +10,7 @@ tmp/
 *.log
 test_*.py
 test_*.sh
+!test_e2e*.sh
 DEBUGGING_REPORT.md
 DECISION_LOG_*.md
 check_mps.py
