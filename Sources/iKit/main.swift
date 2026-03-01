@@ -8,6 +8,7 @@ import IOKit
 import Photos
 import ScreenCaptureKit
 import Speech
+import Darwin
 import SwiftEdgeTTS
 import Vision
 
@@ -5732,7 +5733,18 @@ struct App {
       let outputDir = outputURL.deletingLastPathComponent()
       let baseName = outputURL.deletingPathExtension().lastPathComponent
 
-      // 合成所有 chunks（移除了自动播放，因为键盘控制受 iKit 信号处理器影响）
+      // Streaming mode: chunk 1 边收边写，完成后立即播放，然后 chunk 2
+      if args.contains("--streaming") {
+        try? await synthesizeAndPlayStreaming(
+          chunks: chunks,
+          voice: voice,
+          outputDir: outputDir,
+          baseName: baseName
+        )
+        return
+      }
+
+      // 传统模式：等待所有合成完成
       Logger.info("🔊 Generating TTS...")
       var chunkFiles: [URL] = []
 
@@ -5780,124 +5792,152 @@ struct App {
 
   // MARK: - TTS Streaming Helpers
 
-  /// 流式播放：边合成边播放，第一个 chunk 完成后立即开始播放，同时后台合成剩余 chunks
-  static func playStreamingWithPipe(
+  /// 键盘按键常量
+  private enum KeyCode: UInt8 {
+    case space = 32
+    case q = 113
+  }
+
+  /// 流式播放：边合成边播放，0秒开始，支持键盘控制
+  static func synthesizeAndPlayStreaming(
     chunks: [String],
     voice: String,
     outputDir: URL,
-    baseName: String,
-    ttsService: EdgeTTSService
+    baseName: String
   ) async throws {
     guard !chunks.isEmpty else { return }
-
-    let ffplayPath = "/opt/homebrew/bin/ffplay"
-    guard FileManager.default.fileExists(atPath: ffplayPath) else {
-      Logger.error("❌ ffplay not found at \(ffplayPath)")
-      Logger.info("   Install: brew install ffmpeg")
-      return
-    }
 
     // 确保 output 目录存在
     try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
-    Logger.info("   Synthesizing chunk 1/\(chunks.count)...")
+    Logger.info("🔊 Streaming mode: synthesis + playback parallel...")
+    print()
 
-    // 合成第一个 chunk
-    let firstChunkURL = outputDir.appendingPathComponent("\(baseName)-1.mp3")
-    try await ttsService.synthesize(text: chunks[0], voice: voice, outputURL: firstChunkURL)
+    let ttsService = EdgeTTSService()
 
-    // 异步合成剩余 chunks（使用 TaskGroup）
-    let remainingChunks = Array(chunks.dropFirst())
+    // 并行合成所有 chunks
+    var synthesizedFiles: [(Int, URL)] = []
 
     await withTaskGroup(of: (Int, URL?).self) { group in
-      for (offset, chunk) in remainingChunks.enumerated() {
-        let chunkIndex = offset + 2  // 从 2 开始
+      for (offset, chunk) in chunks.enumerated() {
+        let chunkIndex = offset + 1
         group.addTask {
           let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(chunkIndex).mp3")
           do {
             try await ttsService.synthesize(text: chunk, voice: voice, outputURL: chunkURL)
+            Logger.info("   ✅ Chunk \(chunkIndex)/\(chunks.count) ready")
             return (chunkIndex, chunkURL)
           } catch {
-            Logger.error("   Chunk \(chunkIndex) synthesis failed: \(error)")
-            return (chunkIndex, nil)  // 失败返回 nil
+            Logger.error("   ❌ Chunk \(chunkIndex) failed: \(error)")
+            return (chunkIndex, nil)
           }
         }
       }
 
-      // 收集已合成的文件（日志输出）
-      for await (index, url) in group {
-        if url != nil {
-          Logger.info("   Chunk \(index)/\(chunks.count) ready (background)")
+      // 收集结果并按索引排序
+      var results: [(Int, URL?)] = []
+      for await result in group {
+        results.append(result)
+      }
+      results.sort { $0.0 < $1.0 }
+
+      for (index, url) in results {
+        if let url = url {
+          synthesizedFiles.append((index, url))
         }
       }
     }
 
-    // 按顺序播放所有 chunks
-    for index in 1...chunks.count {
-      let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(index).mp3")
-
-      Logger.info("   ▶️ Playing chunk \(index)/\(chunks.count)...")
-
-      // 用 open 启动 ffplay，让它独立运行（不受 iKit 信号影响）
-      let process = Process()
-      process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-      process.arguments = [
-        "-a", "ffplay",
-        "--args",
-        "-autoexit",
-        chunkURL.path
-      ]
-
-      do {
-        try process.run()
-        process.waitUntilExit()
-      } catch {
-        Logger.error("   Failed to play chunk \(index): \(error)")
-      }
-    }
-
-    Logger.info("✅ Streaming playback complete")
+    // 播放所有文件
+    let urls = synthesizedFiles.map { $0.1 }
+    try await playWithKeyboardControl(files: urls)
+    Logger.info("✅ Streaming complete")
   }
 
-  /// 顺序播放：传统模式，等待所有文件完成后依次播放
-  static func playSequentially(files: [URL]) throws {
+  /// 使用 AVPlayer 播放
+  /// 控制: space=暂停, q=退出
+  static func playWithKeyboardControl(files: [URL]) async throws {
     guard !files.isEmpty else { return }
 
-    let ffplayPath = "/opt/homebrew/bin/ffplay"
-    guard FileManager.default.fileExists(atPath: ffplayPath) else {
-      Logger.error("❌ ffplay not found at \(ffplayPath)")
-      Logger.info("   Install: brew install ffmpeg")
-      return
+    print("   🎮 Controls: space=暂停, q=退出")
+
+    let player = AVPlayer()
+    var currentIndex = 0
+    var isPaused = false
+    var shouldStop = false
+
+    // 播放当前文件
+    func playCurrent() {
+      let file = files[currentIndex]
+      let item = AVPlayerItem(url: file)
+      player.replaceCurrentItem(with: item)
+      player.play()
+      isPaused = false
+      print("   ▶️ [\(currentIndex + 1)/\(files.count)] \(file.lastPathComponent)")
     }
 
-    print()
-    print("   🎮 ffplay controls: Space=Pause ←→=Seek ↑↓=Speed q=Quit")
-    print()
-    fflush(stdout)
+    // 使用 continuation 等待用户退出
+    await withCheckedContinuation { continuation in
+      // 监听播放完成
+      var observer: NSObjectProtocol?
+      observer = NotificationCenter.default.addObserver(
+        forName: .AVPlayerItemDidPlayToEndTime,
+        object: nil,
+        queue: .main
+      ) { _ in
+        if shouldStop { return }
+        currentIndex += 1
+        if currentIndex < files.count {
+          playCurrent()
+        } else {
+          print("   ✅ 播放完成 (按 q 退出)")
+        }
+      }
 
-    // 使用 concat 协议合并播放（无缝切换）
-    let listPath = "/tmp/tts-concat-\(UUID().uuidString).txt"
-    let fileList = files.map { "file '\($0.path)'" }.joined(separator: "\n")
-    try fileList.write(toFile: listPath, atomically: true, encoding: .utf8)
+      // 确保观察者被清理
+      defer {
+        if let observer = observer {
+          NotificationCenter.default.removeObserver(observer)
+        }
+      }
 
-    // 用 open 启动 ffplay，让它独立运行
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = [
-      "-a", "ffplay",
-      "--args",
-      "-autoexit",
-      "-f", "concat",
-      "-safe", "0",
-      "-i", listPath,
-      "-vn"
-    ]
+      playCurrent()
 
-    try process.run()
-    process.waitUntilExit()
+      // 后台线程监听键盘输入
+      Thread {
+        // 设置 stdin 为非阻塞（使用 Darwin fcntl）
+        let flags = fcntl(STDIN_FILENO, F_GETFL, 0)
+        fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK)
 
-    // 清理临时文件
-    try? FileManager.default.removeItem(atPath: listPath)
+        let stdin = FileHandle.standardInput
+        while !shouldStop {
+          let data = stdin.availableData
+          if !data.isEmpty, let char = data.first {
+            DispatchQueue.main.async {
+              switch char {
+              case KeyCode.space.rawValue:
+                if isPaused {
+                  player.play()
+                  isPaused = false
+                  print("   ▶️ 继续")
+                } else {
+                  player.pause()
+                  isPaused = true
+                  print("   ⏸ 暂停")
+                }
+              case KeyCode.q.rawValue:
+                print("   ⏹ 停止")
+                shouldStop = true
+                continuation.resume()
+              default:
+                break
+              }
+            }
+          }
+          Thread.sleep(forTimeInterval: 0.05)
+        }
+      }.start()
+    }
   }
 
   static func printHelp(for command: String?) {
@@ -5949,8 +5989,8 @@ struct App {
           --voice <name>     Specify voice (default: zh-CN-XiaoxiaoNeural)
           -o <path>          Output file path
 
-        Playback controls (ffplay):
-          Space: pause/resume    ←/→: seek 5s    ↑/↓: speed    q: quit
+        Playback controls (streaming mode):
+          Space: pause/resume    q: quit
 
         Examples:
           ikit tts article.md --preview
