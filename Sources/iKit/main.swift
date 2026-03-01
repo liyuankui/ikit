@@ -5732,25 +5732,7 @@ struct App {
       let outputDir = outputURL.deletingLastPathComponent()
       let baseName = outputURL.deletingPathExtension().lastPathComponent
 
-      // 管道流式播放模式：边合成边播放
-      if args.contains("--streaming") {
-        Logger.info("🔊 Streaming mode (synthesis + playback parallel)...")
-        fflush(stdout)
-        print()
-        print("   🎮 ffplay controls: Space=Pause ←→=Seek ↑↓=Speed q=Quit")
-        print()
-        fflush(stdout)
-        try? await playStreamingWithPipe(
-          chunks: chunks,
-          voice: voice,
-          outputDir: outputDir,
-          baseName: baseName,
-          ttsService: ttsService
-        )
-        return
-      }
-
-      // 传统模式：等待所有合成完成
+      // 合成所有 chunks（移除了自动播放，因为键盘控制受 iKit 信号处理器影响）
       Logger.info("🔊 Generating TTS...")
       var chunkFiles: [URL] = []
 
@@ -5779,15 +5761,17 @@ struct App {
 
       Logger.info("✅ TTS saved: \(chunkFiles.count) files")
 
-      // Auto-play with ffplay if requested
-      if args.contains("--play") {
-        Logger.info("▶️  Playing with ffplay...")
-        try? playSequentially(files: chunkFiles)
-      } else {
-        // 列出生成的文件
-        for (index, file) in chunkFiles.enumerated() {
-          print("   [\(index + 1)] \(file.lastPathComponent)")
-        }
+      // 列出生成的文件并提供播放命令
+      for (index, file) in chunkFiles.enumerated() {
+        print("   [\(index + 1)] \(file.path)")
+      }
+
+      if !chunkFiles.isEmpty {
+        print()
+        print("   💡 Play with:")
+        print("      mpv", chunkFiles.map { $0.path }.joined(separator: " "))
+        print()
+        fflush(stdout)
       }
 
     default: printHelp(for: nil)
