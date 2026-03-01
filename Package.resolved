@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "swiftedgetts",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/herrkaefer/SwiftEdgeTTS.git",
+      "state" : {
+        "revision" : "6fafd2dd66e45358812c98e3bb2fa28b2757e614",
+        "version" : "1.3.0"
+      }
+    }
+  ],
+  "version" : 2
+}

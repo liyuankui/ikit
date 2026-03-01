@@ -8,6 +8,7 @@ import IOKit
 import Photos
 import ScreenCaptureKit
 import Speech
+import SwiftEdgeTTS
 import Vision
 
 // MARK: - IOKit Power Management Declarations
@@ -5627,8 +5628,289 @@ struct App {
         printHelp(for: "timer")
       }
 
+    case "tts":
+      // TTS: Text-to-Speech for Markdown files
+      // Uses SwiftEdgeTTS (pure Swift, no Python dependencies)
+
+      if args.count < 3 {
+        printHelp(for: "tts")
+        return
+      }
+
+      let mdFile = args[2]
+      guard FileManager.default.fileExists(atPath: mdFile) else {
+        Logger.error("File not found: \(mdFile)")
+        return
+      }
+
+      // Read and clean markdown content
+      guard let content = try? String(contentsOfFile: mdFile, encoding: .utf8) else {
+        Logger.error("Failed to read file: \(mdFile)")
+        return
+      }
+
+      // Simple markdown cleaning (remove YAML frontmatter, code blocks)
+      let lines = content.split(separator: "\n")
+      var cleanedLines: [String] = []
+      var inYaml = false
+      var yamlCount = 0
+      var inCodeBlock = false
+
+      for line in lines {
+        if line.trimmingCharacters(in: .whitespaces).hasPrefix("---") {
+          yamlCount += 1
+          if yamlCount == 1 { inYaml = true; continue }
+          if yamlCount == 2 { inYaml = false; continue }
+        }
+        if inYaml { continue }
+        if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+          inCodeBlock.toggle()
+          continue
+        }
+        if inCodeBlock { continue }
+        // Remove markdown symbols
+        var cleaned = line
+          .replacingOccurrences(of: "^#{1,6}\\s*", with: "", options: .regularExpression)
+          .replacingOccurrences(of: "\\*\\*", with: "", options: .regularExpression)
+          .replacingOccurrences(of: "__", with: "", options: .regularExpression)
+          .replacingOccurrences(of: "`", with: "")
+          .replacingOccurrences(of: "^>\\s*", with: "", options: .regularExpression)
+        cleaned = cleaned.trimmingCharacters(in: .whitespaces)
+        if !cleaned.isEmpty {
+          cleanedLines.append(cleaned)
+        }
+      }
+
+      let cleanedText = cleanedLines.joined(separator: "\n")
+
+      // Get voice parameter
+      let voice = getStringParam("--voice") ?? "zh-CN-XiaoxiaoNeural"
+
+      // Determine output path
+      let timestamp = ISO8601DateFormatter().string(from: Date())
+        .replacingOccurrences(of: ":", with: "-")
+        .replacingOccurrences(of: ".", with: "-")
+        .dropLast(3)
+      let defaultOutput = "/tmp/md-tts-\(timestamp).mp3"
+      let outputPath = getStringParam("-o") ?? defaultOutput
+      let outputURL = URL(fileURLWithPath: outputPath)
+
+      // Preview mode
+      if args.contains("--preview") || args.contains("-p") {
+        print("📖 Cleaning: \(mdFile)")
+        let origLines = lines.count
+        let cleanLinesCount = cleanedLines.count
+        print("📊 Statistics:")
+        print("  Lines:   \(origLines) → \(cleanLinesCount) (\(Double(cleanLinesCount) / Double(origLines) * 100).1f%)")
+        print()
+        print("📄 Preview (first 10 lines):")
+        print()
+        print("  CLEANED TEXT:")
+        print("  " + String(repeating: "-", count: 60))
+        for line in cleanedLines.prefix(10) {
+          print("  \(line.prefix(60))")
+        }
+        return
+      }
+
+      // Generate TTS
+      let ttsService = EdgeTTSService()
+
+      // 分段处理长文本（每段约 500 字符）
+      let maxChunkLength = 500
+      var chunks: [String] = []
+      var index = cleanedText.startIndex
+
+      while index < cleanedText.endIndex {
+        let end = cleanedText.index(index, offsetBy: maxChunkLength, limitedBy: cleanedText.endIndex) ?? cleanedText.endIndex
+        chunks.append(String(cleanedText[index..<end]))
+        index = end
+      }
+
+      Logger.info("   Split into \(chunks.count) chunk(s)")
+
+      let outputDir = outputURL.deletingLastPathComponent()
+      let baseName = outputURL.deletingPathExtension().lastPathComponent
+
+      // 管道流式播放模式：边合成边播放
+      if args.contains("--streaming") {
+        Logger.info("🔊 Streaming mode (synthesis + playback parallel)...")
+        fflush(stdout)
+        print()
+        print("   🎮 ffplay controls: Space=Pause ←→=Seek ↑↓=Speed q=Quit")
+        print()
+        fflush(stdout)
+        try? await playStreamingWithPipe(
+          chunks: chunks,
+          voice: voice,
+          outputDir: outputDir,
+          baseName: baseName,
+          ttsService: ttsService
+        )
+        return
+      }
+
+      // 传统模式：等待所有合成完成
+      Logger.info("🔊 Generating TTS...")
+      var chunkFiles: [URL] = []
+
+      for (index, chunk) in chunks.enumerated() {
+        Logger.info("   Processing chunk \(index + 1)/\(chunks.count)...")
+        do {
+          let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(index + 1).mp3")
+          try await ttsService.synthesize(
+            text: chunk,
+            voice: voice,
+            outputURL: chunkURL
+          )
+          chunkFiles.append(chunkURL)
+
+          // 短暂延迟，避免请求过快
+          try await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+        } catch {
+          Logger.error("❌ Chunk \(index + 1) failed: \(error)")
+        }
+      }
+
+      if chunkFiles.isEmpty {
+        Logger.error("❌ No audio data generated")
+        return
+      }
+
+      Logger.info("✅ TTS saved: \(chunkFiles.count) files")
+
+      // Auto-play with ffplay if requested
+      if args.contains("--play") {
+        Logger.info("▶️  Playing with ffplay...")
+        try? playSequentially(files: chunkFiles)
+      } else {
+        // 列出生成的文件
+        for (index, file) in chunkFiles.enumerated() {
+          print("   [\(index + 1)] \(file.lastPathComponent)")
+        }
+      }
+
     default: printHelp(for: nil)
     }
+  }
+
+  // MARK: - TTS Streaming Helpers
+
+  /// 流式播放：边合成边播放，第一个 chunk 完成后立即开始播放，同时后台合成剩余 chunks
+  static func playStreamingWithPipe(
+    chunks: [String],
+    voice: String,
+    outputDir: URL,
+    baseName: String,
+    ttsService: EdgeTTSService
+  ) async throws {
+    guard !chunks.isEmpty else { return }
+
+    let ffplayPath = "/opt/homebrew/bin/ffplay"
+    guard FileManager.default.fileExists(atPath: ffplayPath) else {
+      Logger.error("❌ ffplay not found at \(ffplayPath)")
+      Logger.info("   Install: brew install ffmpeg")
+      return
+    }
+
+    // 确保 output 目录存在
+    try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+
+    Logger.info("   Synthesizing chunk 1/\(chunks.count)...")
+
+    // 合成第一个 chunk
+    let firstChunkURL = outputDir.appendingPathComponent("\(baseName)-1.mp3")
+    try await ttsService.synthesize(text: chunks[0], voice: voice, outputURL: firstChunkURL)
+
+    // 异步合成剩余 chunks（使用 TaskGroup）
+    let remainingChunks = Array(chunks.dropFirst())
+
+    await withTaskGroup(of: (Int, URL?).self) { group in
+      for (offset, chunk) in remainingChunks.enumerated() {
+        let chunkIndex = offset + 2  // 从 2 开始
+        group.addTask {
+          let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(chunkIndex).mp3")
+          do {
+            try await ttsService.synthesize(text: chunk, voice: voice, outputURL: chunkURL)
+            return (chunkIndex, chunkURL)
+          } catch {
+            Logger.error("   Chunk \(chunkIndex) synthesis failed: \(error)")
+            return (chunkIndex, nil)  // 失败返回 nil
+          }
+        }
+      }
+
+      // 收集已合成的文件（日志输出）
+      for await (index, url) in group {
+        if url != nil {
+          Logger.info("   Chunk \(index)/\(chunks.count) ready (background)")
+        }
+      }
+    }
+
+    // 按顺序播放所有 chunks
+    for index in 1...chunks.count {
+      let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(index).mp3")
+
+      Logger.info("   ▶️ Playing chunk \(index)/\(chunks.count)...")
+
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: ffplayPath)
+      // 不使用 -nodisp，让 ffplay 显示控制窗口和响应键盘
+      process.arguments = [
+        "-autoexit",
+        "-loglevel", "error",
+        chunkURL.path
+      ]
+
+      do {
+        try process.run()
+        process.waitUntilExit()
+      } catch {
+        Logger.error("   Failed to play chunk \(index): \(error)")
+      }
+    }
+
+    Logger.info("✅ Streaming playback complete")
+  }
+
+  /// 顺序播放：传统模式，等待所有文件完成后依次播放
+  static func playSequentially(files: [URL]) throws {
+    guard !files.isEmpty else { return }
+
+    let ffplayPath = "/opt/homebrew/bin/ffplay"
+    guard FileManager.default.fileExists(atPath: ffplayPath) else {
+      Logger.error("❌ ffplay not found at \(ffplayPath)")
+      Logger.info("   Install: brew install ffmpeg")
+      return
+    }
+
+    print()
+    print("   🎮 ffplay controls: Space=Pause ←→=Seek ↑↓=Speed q=Quit")
+    print()
+    fflush(stdout)
+
+    // 使用 concat 协议合并播放（无缝切换）
+    let listPath = "/tmp/tts-concat-\(UUID().uuidString).txt"
+    let fileList = files.map { "file '\($0.path)'" }.joined(separator: "\n")
+    try fileList.write(toFile: listPath, atomically: true, encoding: .utf8)
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: ffplayPath)
+    process.arguments = [
+      "-autoexit",
+      "-loglevel", "error",
+      "-f", "concat",
+      "-safe", "0",
+      "-i", listPath,
+      "-vn"  // 禁用视频
+    ]
+
+    try process.run()
+    process.waitUntilExit()
+
+    // 清理临时文件
+    try? FileManager.default.removeItem(atPath: listPath)
   }
 
   static func printHelp(for command: String?) {
@@ -5668,6 +5950,27 @@ struct App {
           ikit timer list
           ikit timer cancel timer-daily-0900
         """
+    case "tts":
+      helpText = """
+        TTS: Text-to-Speech for Markdown files
+          <file.md> [--preview] [--play|--streaming] [--voice <name>] [-o <output.mp3>]
+
+        Options:
+          --preview, -p      Show cleaning preview (no TTS generation)
+          --play             Auto-play all chunks after generation
+          --streaming        Streaming playback (first chunk ready = play starts)
+          --voice <name>     Specify voice (default: zh-CN-XiaoxiaoNeural)
+          -o <path>          Output file path
+
+        Playback controls (ffplay):
+          Space: pause/resume    ←/→: seek 5s    ↑/↓: speed    q: quit
+
+        Examples:
+          ikit tts article.md --preview
+          ikit tts article.md --play
+          ikit tts article.md --streaming    # Start ASAP, background synthesis
+          ikit tts article.md --voice zh-CN-YunxiNeural --streaming
+        """
     case "config": helpText = "Config: init, show"
     case "doctor":
       helpText = """
@@ -5676,7 +5979,7 @@ struct App {
         """
     default:
       helpText =
-        "iKit v\(VERSION) | Usage: ikit [init|doctor|task|cal|note|photo|ocr|contact|sc|meet|timer|config] [command] [args] [--json] [--id] [--dry-run] [--help] [-v]"
+        "iKit v\(VERSION) | Usage: ikit [init|doctor|task|cal|note|photo|ocr|contact|sc|meet|timer|tts|config] [command] [args] [--json] [--id] [--dry-run] [--help] [-v]"
     }
     print(helpText)
   }
