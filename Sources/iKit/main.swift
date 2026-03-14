@@ -5859,20 +5859,36 @@ struct App {
       }
 
     case "transcribe":
-      // Top-level audio transcription command
+      // Top-level audio transcription command (Agent-friendly design)
+      let startDate = Date()
+
+      // Progressive --help: no audio file provided
       if args.count < 3 {
-        print("Usage: ikit transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]")
+        print(agentError("transcribe: usage: transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]",
+                        suggestion: "ikit transcribe meeting.m4a --engine groq"))
+        print("[exit:1 | 0ms]")
         return
       }
 
       let audioPath = args[2]
+
+      // Validate file exists with remediation
       guard FileManager.default.fileExists(atPath: audioPath) else {
-        Logger.error("❌ Audio file not found: \(audioPath)")
+        let suggestion = FileManager.default.fileExists(atPath: audioPath + ".m4a") ? "Did you mean: \(audioPath).m4a?" : "Check file path with: ls -l \(audioPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
+        print(agentError("Audio file not found: \(audioPath)", suggestion: suggestion))
+        print("[exit:1 | 0ms]")
         return
       }
 
       let engine = getStringParam("--engine") ?? "groq"
       let language = getStringParam("--language") ?? "auto"
+
+      // Validate engine
+      guard ["groq", "funasr"].contains(engine) else {
+        print(agentError("Unknown engine: \(engine)", suggestion: "Use --engine groq|funasr"))
+        print("[exit:1 | 0ms]")
+        return
+      }
 
       if engine == "groq" {
         // Use Groq whisper-large-v3 via direct API call
@@ -5883,25 +5899,31 @@ struct App {
             .appendingPathExtension("txt").path
           do {
             try text.write(toFile: outputPath, atomically: true, encoding: .utf8)
-            Logger.info("💾 Saved to: \(outputPath)")
-            print("\n--- Transcription ---")
+            let duration = Date().timeIntervalSince(startDate)
             print(text)
+            agentOutput("Saved to: \(outputPath)", exitCode: 0, duration: duration)
           } catch {
-            Logger.error("❌ Failed to save: \(error)")
+            let duration = Date().timeIntervalSince(startDate)
+            print(agentError("Failed to save: \(error.localizedDescription)", suggestion: "Check directory permissions: ls -la \(outputPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"))
+            print("[exit:1 | \(formatDuration(duration))]")
           }
+        } else {
+          let duration = Date().timeIntervalSince(startDate)
+          print(agentError("Transcription failed", suggestion: "Check GROQ_API_KEY in config or try: --engine funasr"))
+          print("[exit:1 | \(formatDuration(duration))]")
         }
       } else {
         // Use Python script (FunASR, WhisperX, etc.)
         guard let python = configManager.current.python_path,
           let script = configManager.current.transcribe_script
         else {
-          Logger.error("Python/Script path not configured")
+          print(agentError("Python/Script path not configured", suggestion: "Run: ikit config && set python_path and transcribe_script"))
+          print("[exit:1 | 0ms]")
           return
         }
 
         let out = URL(fileURLWithPath: audioPath).deletingPathExtension().appendingPathExtension("json")
           .path
-        Logger.info("🎤 Transcribing (\(engine)): \(audioPath)")
 
         var scriptArgs = [script, audioPath, "--output", out, "--engine", engine]
         if language != "auto" {
@@ -5910,40 +5932,57 @@ struct App {
         }
 
         let result = Shell.run(python, args: scriptArgs)
+        let duration = Date().timeIntervalSince(startDate)
 
+        // Output Python script results (may include progress bars)
         if let output = result.output, !output.isEmpty {
           for line in output.components(separatedBy: "\n") where !line.isEmpty {
-            print(line)
+            // Filter out progress bar noise for Agent consumption
+            if !line.contains("%") && !line.contains("█") && !line.contains("▉") {
+              print(line)
+            }
           }
         }
 
         if result.exitCode == 0 {
           if FileManager.default.fileExists(atPath: out) {
-            Logger.info("✅ Saved to: \(out)")
+            agentOutput("Saved to: \(out)", exitCode: 0, duration: duration)
+          } else {
+            agentOutput("Transcription complete", exitCode: 0, duration: duration)
           }
         } else {
-          Logger.error("❌ Failed (exit code: \(result.exitCode))")
+          print(agentError("Transcription failed (exit \(result.exitCode))", suggestion: "Check Python script logs or try: --engine groq"))
+          print("[exit:\(result.exitCode) | \(formatDuration(duration))]")
         }
       }
 
     case "tts":
       // TTS: Text-to-Speech for Markdown files
       // Uses SwiftEdgeTTS (pure Swift, no Python dependencies)
+      let startDate = Date()
 
+      // Progressive --help: no markdown file provided
       if args.count < 3 {
-        printHelp(for: "tts")
+        print(agentError("tts: usage: tts <markdown-file> [-o output.mp3] [--voice NAME] [--preview] [--streaming]",
+                        suggestion: "ikit tts README.md -o intro.mp3 --voice zh-CN-XiaoxiaoNeural"))
+        print("[exit:1 | 0ms]")
         return
       }
 
       let mdFile = args[2]
+
+      // Validate file exists with remediation
       guard FileManager.default.fileExists(atPath: mdFile) else {
-        Logger.error("File not found: \(mdFile)")
+        let suggestion = mdFile.hasSuffix(".md") ? "Check file path: ls -l \(mdFile)" : "Markdown files must have .md extension"
+        print(agentError("File not found: \(mdFile)", suggestion: suggestion))
+        print("[exit:1 | 0ms]")
         return
       }
 
       // Read and clean markdown content
       guard let content = try? String(contentsOfFile: mdFile, encoding: .utf8) else {
-        Logger.error("Failed to read file: \(mdFile)")
+        print(agentError("Failed to read file: \(mdFile)", suggestion: "Check file encoding (must be UTF-8) and permissions"))
+        print("[exit:1 | 0ms]")
         return
       }
 
@@ -5995,19 +6034,21 @@ struct App {
 
       // Preview mode
       if args.contains("--preview") || args.contains("-p") {
-        print("📖 Cleaning: \(mdFile)")
         let origLines = lines.count
         let cleanLinesCount = cleanedLines.count
-        print("📊 Statistics:")
-        print("  Lines:   \(origLines) → \(cleanLinesCount) (\(Double(cleanLinesCount) / Double(origLines) * 100).1f%)")
+        let ratio = origLines > 0 ? Double(cleanLinesCount) / Double(origLines) * 100 : 0
+        print("Cleaning: \(mdFile)")
+        print("Statistics:")
+        print("  Lines:   \(origLines) → \(cleanLinesCount) (\(String(format: "%.1f", ratio))%)")
         print()
-        print("📄 Preview (first 10 lines):")
-        print()
+        print("Preview (first 10 lines):")
         print("  CLEANED TEXT:")
         print("  " + String(repeating: "-", count: 60))
         for line in cleanedLines.prefix(10) {
           print("  \(line.prefix(60))")
         }
+        let duration = Date().timeIntervalSince(startDate)
+        print("[exit:0 | \(formatDuration(duration))]")
         return
       }
 
@@ -6042,11 +6083,9 @@ struct App {
       }
 
       // 传统模式：等待所有合成完成
-      Logger.info("🔊 Generating TTS...")
       var chunkFiles: [URL] = []
 
       for (index, chunk) in chunks.enumerated() {
-        Logger.info("   Processing chunk \(index + 1)/\(chunks.count)...")
         do {
           let chunkURL = outputDir.appendingPathComponent("\(baseName)-\(index + 1).mp3")
           try await ttsService.synthesize(
@@ -6059,29 +6098,24 @@ struct App {
           // 短暂延迟，避免请求过快
           try await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
         } catch {
-          Logger.error("❌ Chunk \(index + 1) failed: \(error)")
+          print("[stderr] Chunk \(index + 1) failed: \(error)")
         }
       }
 
       if chunkFiles.isEmpty {
-        Logger.error("❌ No audio data generated")
+        let duration = Date().timeIntervalSince(startDate)
+        print(agentError("No audio data generated", suggestion: "Check voice name with: ikit tts --help"))
+        print("[exit:1 | \(formatDuration(duration))]")
         return
       }
 
-      Logger.info("✅ TTS saved: \(chunkFiles.count) files")
-
       // 列出生成的文件并提供播放命令
       for (index, file) in chunkFiles.enumerated() {
-        print("   [\(index + 1)] \(file.path)")
+        print("[\(index + 1)] \(file.path)")
       }
 
-      if !chunkFiles.isEmpty {
-        print()
-        print("   💡 Play with:")
-        print("      mpv", chunkFiles.map { $0.path }.joined(separator: " "))
-        print()
-        fflush(stdout)
-      }
+      let playCmd = "mpv " + chunkFiles.map { $0.path }.joined(separator: " ")
+      agentOutput("TTS: \(chunkFiles.count) files. Play: \(playCmd)", exitCode: 0, duration: Date().timeIntervalSince(startDate))
 
     default: printHelp(for: nil)
     }
@@ -6148,7 +6182,7 @@ struct App {
     // 播放所有文件
     let urls = synthesizedFiles.map { $0.1 }
     try await playWithKeyboardControl(files: urls)
-    Logger.info("✅ Streaming complete")
+    print("Streaming complete: \(urls.count) chunks played")
   }
 
   /// 使用 AVPlayer 播放
@@ -6237,6 +6271,47 @@ struct App {
     }
   }
 
+  // MARK: - Agent CLI Helper Functions
+
+  /// Format duration for Agent cost awareness
+  private static func formatDuration(_ t: TimeInterval) -> String {
+    if t < 1 { return "\(Int(t*1000))ms" }
+    if t < 60 { return String(format: "%.1fs", t) }
+    return "\(Int(t))s"
+  }
+
+  /// Agent-friendly output with metadata
+  static func agentOutput(_ result: String, exitCode: Int = 0, duration: TimeInterval = 0) {
+    print(result)
+    print("[exit:\(exitCode) | \(formatDuration(duration))]")
+  }
+
+  /// Agent-friendly error with remediation suggestion
+  static func agentError(_ message: String, suggestion: String? = nil) -> String {
+    var result = "[error] \(message)"
+    if let s = suggestion {
+      result += "\n💡 Try: \(s)"
+    }
+    return result
+  }
+
+  /// Unified JSON output wrapper
+  static func jsonOutput(_ data: [String: Any], exitCode: Int = 0, duration: TimeInterval = 0) -> String {
+    var output: [String: Any] = [
+      "status": exitCode == 0 ? "success" : "error",
+      "data": data,
+      "metadata": [
+        "exit": exitCode,
+        "duration_ms": Int(duration * 1000)
+      ]
+    ]
+    if let json = try? JSONSerialization.data(withJSONObject: output, options: .prettyPrinted),
+       let jsonStr = String(data: json, encoding: .utf8) {
+      return jsonStr
+    }
+    return "{}"
+  }
+
   static func printHelp(for command: String?) {
     let helpText: String
     switch command {
@@ -6320,8 +6395,32 @@ struct App {
           Checks Python, dependencies, and model cache status
         """
     default:
-      helpText =
-        "iKit v\(VERSION) | Usage: ikit [init|doctor|task|cal|note|photo|ocr|contact|sc|meet|timer|transcribe|tts|config] [command] [args] [--json] [--id] [--dry-run] [--help] [-v]"
+      helpText = """
+iKit v\(VERSION) - Apple Ecosystem CLI for Agents
+
+Apple Data:
+  notes      — Notes (sync, list, search, create, update, delete, move, read)
+  tasks      — Reminders (list, create, complete, delete)
+  calendar   — Calendar (list, create, delete)
+  photos     — Photos (list, ocr, search)
+  contacts   — Contacts (search)
+
+Productivity:
+  meet       — Meeting recording (start, transcribe, process)
+  timer      — Timers (new, list, cancel, logs)
+
+AI/Media:
+  transcribe — ASR transcription (groq, funasr)
+  tts        — Text-to-Speech for Markdown
+  ocr        — Image OCR
+
+System:
+  config     — Configuration management
+  doctor     — System health check
+  init       — Initialize iKit
+
+Use 'ikit <module> --help' for details.
+"""
     }
     print(helpText)
   }
