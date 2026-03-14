@@ -2926,12 +2926,124 @@ class NotesBridge: NSObject {
   }
 }
 
+// MARK: - Time Parsing Helper
+/// Parse relative time expressions like "4 hours ago", "-2h", "yesterday" into Date
+/// - Parameter expression: Time expression to parse
+/// - Returns: Date representing the parsed time, or nil if parsing failed
+func parseRelativeTime(_ expression: String) -> Date? {
+  let now = Date()
+  let trimmed = expression.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+  // Handle "X ago" format
+  if trimmed.hasSuffix("ago") {
+    let parts = trimmed.dropLast(4).trimmingCharacters(in: .whitespaces)
+    return parseTimeOffset(parts, now: now)
+  }
+
+  // Handle "-X" format (negative offset)
+  if trimmed.hasPrefix("-") {
+    let offset = String(trimmed.dropFirst())
+    return parseTimeOffset(offset, now: now)
+  }
+
+  // Handle absolute date formats (before bare offset to avoid treating "2026-03-14" as offset)
+  let dateFormatter = DateFormatter()
+  dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+
+  // Try "YYYY-MM-DD HH:mm" format
+  dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
+  if let date = dateFormatter.date(from: expression) {
+    return date
+  }
+
+  // Try "YYYY-MM-DD" format
+  dateFormatter.dateFormat = "yyyy-MM-dd"
+  if let date = dateFormatter.date(from: expression) {
+    return date
+  }
+
+  // Handle bare offset format like "30m", "2h", "1d" (assume past)
+  // Check if it starts with a number (but not a raw Unix timestamp > 1000000000)
+  if let firstChar = trimmed.first, firstChar.isNumber {
+    // Check if this might be a Unix timestamp (10+ digits)
+    if trimmed.count < 10 {
+      if let result = parseTimeOffset(trimmed, now: now) {
+        return result
+      }
+    }
+  }
+
+  // Handle "yesterday"
+  if trimmed == "yesterday" {
+    return Calendar.current.date(byAdding: .day, value: -1, to: now)
+  }
+
+  // Handle "today"
+  if trimmed == "today" {
+    return Calendar.current.startOfDay(for: now)
+  }
+
+  // Try raw Unix timestamp
+  if let timestamp = TimeInterval(trimmed) {
+    return Date(timeIntervalSince1970: timestamp)
+  }
+
+  return nil
+}
+
+/// Parse time offset like "2h", "30m", "1d" into a Date
+private func parseTimeOffset(_ offset: String, now: Date) -> Date? {
+  let cal = Calendar.current
+  let trimmed = offset.trimmingCharacters(in: .whitespaces)
+
+  // Match patterns like "2h", "30m", "1d", "4 hours", "30 minutes"
+  if trimmed.isEmpty { return nil }
+
+  // Extract number and unit
+  var numberStr = ""
+  var unitStr = ""
+
+  var i = trimmed.startIndex
+  while i < trimmed.endIndex {
+    let c = trimmed[i]
+    if c.isNumber || c == "." {
+      numberStr.append(c)
+    } else {
+      unitStr = String(trimmed[i...])
+      break
+    }
+    i = trimmed.index(after: i)
+  }
+
+  guard let value = Double(numberStr) else { return nil }
+
+  // Parse unit
+  let unit = unitStr.trimmingCharacters(in: .whitespaces)
+  let unitChar = unit.isEmpty ? "" : String(unit.prefix(1))
+
+  switch unitChar {
+  case "s", "second", "seconds":
+    return cal.date(byAdding: .second, value: -Int(value), to: now)
+  case "m", "minute", "minutes":
+    return cal.date(byAdding: .minute, value: -Int(value), to: now)
+  case "h", "hour", "hours":
+    return cal.date(byAdding: .hour, value: -Int(value), to: now)
+  case "d", "day", "days":
+    return cal.date(byAdding: .day, value: -Int(value), to: now)
+  case "w", "week", "weeks":
+    return cal.date(byAdding: .day, value: -Int(value * 7), to: now)
+  default:
+    // If no unit specified, assume hours (common case)
+    return cal.date(byAdding: .hour, value: -Int(value), to: now)
+  }
+}
+
 // MARK: - Notes Tool
 class NotesTool {
   let bridge = NotesBridge.shared
   let fm = FileManager.default
 
-  func sync(targetDir: String, folderFilter: String? = nil) {
+  func sync(targetDir: String, folderFilter: String? = nil, since: String? = nil) {
     if let filter = folderFilter {
       Logger.info("🧠 Smart Sync to: \(targetDir) (folder: \(filter))")
     } else {
@@ -2940,7 +3052,7 @@ class NotesTool {
     try? fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
     let timeFile = (targetDir as NSString).appendingPathComponent(".last_sync_time")
     var lastSync = Date(timeIntervalSince1970: 0)
-    let hasHistory = fm.fileExists(atPath: timeFile)
+    var hasHistory = fm.fileExists(atPath: timeFile)
 
     if hasHistory, let ts = try? String(contentsOfFile: timeFile, encoding: .utf8),
       let t = TimeInterval(ts.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -2948,9 +3060,29 @@ class NotesTool {
       lastSync = Date(timeIntervalSince1970: t)
     }
 
+    // Override lastSync if --since parameter is provided
+    var customSince: Date?
+    if let sinceExpr = since {
+      if let parsedDate = parseRelativeTime(sinceExpr) {
+        customSince = parsedDate
+        Logger.info("⏰ Using custom time: \(parsedDate) (from: \(sinceExpr))")
+      } else {
+        Logger.error("❌ Failed to parse time expression: \(sinceExpr)")
+        Logger.error("   Supported formats: \"4 hours ago\", \"-2h\", \"2026-03-14 12:00\", \"yesterday\"")
+        return
+      }
+    }
+
     var notes: [(id: String, name: String, path: String, modDate: Date?)]
 
-    if !hasHistory {
+    // Use customSince if provided, otherwise use file-based lastSync
+    if let custom = customSince {
+      // Custom time override
+      hasHistory = true  // Treat as incremental sync
+      let checkDate = custom.addingTimeInterval(-60)
+      Logger.info("🚀 Custom incremental check since: \(checkDate)")
+      notes = bridge.listRecentlyModified(since: checkDate)
+    } else if !hasHistory {
       Logger.info("🐢 First run detected. Fetching all notes...")
       notes = bridge.listAllNotesSafe()
     } else {
@@ -5101,6 +5233,103 @@ class SecretaryTool {
       }
     }
   }
+
+  /// Transcribe audio using Groq's whisper-large-v3 via local LiteLLM service
+  func transcribeWithGroq(audioPath: String, language: String = "auto") async -> String? {
+    // Load Groq API key from LiteLLM config
+    let envPath = FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".config/litellm/config/.env")
+
+    var apiKey: String?
+    if let envContent = try? String(contentsOfFile: envPath.path) {
+      for line in envContent.components(separatedBy: .newlines) {
+        let line = line.trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("GROQ_API_KEY=") {
+          apiKey = String(line.dropFirst("GROQ_API_KEY=".count))
+          break
+        }
+      }
+    }
+
+    guard let apiKey = apiKey else {
+      Logger.error("❌ GROQ_API_KEY not found in ~/.config/litellm/config/.env")
+      return nil
+    }
+
+    Logger.info("🚀 Transcribing with Groq whisper-large-v3")
+    Logger.info("📁 Audio: \(audioPath)")
+
+    // Prepare multipart form data request
+    let url = URL(string: "https://api.groq.com/openai/v1/audio/transcriptions")!
+    var request = URLRequest(url: url, timeoutInterval: 600)
+    request.httpMethod = "POST"
+    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+    // Build multipart form data boundary
+    let boundary = "Boundary-\(UUID().uuidString)"
+    request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+    var body = Data()
+
+    // Add file field
+    do {
+      let audioData = try Data(contentsOf: URL(fileURLWithPath: audioPath))
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append(
+        "Content-Disposition: form-data; name=\"file\"; filename=\"\(URL(fileURLWithPath: audioPath).lastPathComponent)\"\r\n"
+          .data(using: .utf8)!)
+      body.append("Content-Type: audio/mpeg\r\n\r\n".data(using: .utf8)!)
+      body.append(audioData)
+      body.append("\r\n".data(using: .utf8)!)
+    } catch {
+      Logger.error("❌ Failed to read audio file: \(error)")
+      return nil
+    }
+
+    // Add model field
+    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+    body.append("Content-Disposition: form-data; name=\"model\"\r\n\r\n".data(using: .utf8)!)
+    body.append("whisper-large-v3\r\n".data(using: .utf8)!)
+
+    // Add language field if specified
+    if language != "auto" {
+      body.append("--\(boundary)\r\n".data(using: .utf8)!)
+      body.append("Content-Disposition: form-data; name=\"language\"\r\n\r\n".data(using: .utf8)!)
+      body.append("\(language)\r\n".data(using: .utf8)!)
+    }
+
+    // Add response_format field
+    body.append("--\(boundary)\r\n".data(using: .utf8)!)
+    body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".data(using: .utf8)!)
+    body.append("verbose_json\r\n".data(using: .utf8)!)
+
+    body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+
+    request.httpBody = body
+
+    do {
+      let (data, response) = try await URLSession.shared.data(for: request)
+      if let httpResponse = response as? HTTPURLResponse {
+        if httpResponse.statusCode == 200 {
+          if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let text = json["text"] as? String
+          {
+            Logger.info("✅ Transcription complete!")
+            return text
+          }
+        } else {
+          Logger.error("❌ Groq API error: \(httpResponse.statusCode)")
+          if let errorString = String(data: data, encoding: .utf8) {
+            Logger.error(errorString)
+          }
+        }
+      }
+    } catch {
+      Logger.error("❌ Transcription failed: \(error)")
+    }
+
+    return nil
+  }
 }
 
 // MARK: - Main
@@ -5341,7 +5570,7 @@ struct App {
         return
       }
       if sub == "sync" {
-        t.sync(targetDir: root, folderFilter: getStringParam("--folder"))
+        t.sync(targetDir: root, folderFilter: getStringParam("--folder"), since: getStringParam("--since"))
       } else if sub == "ls" && args.count > 4 {
         let json = args.contains("--json")
         t.list(folder: args[4], json: json)
@@ -5627,6 +5856,74 @@ struct App {
         )
       } else {
         printHelp(for: "timer")
+      }
+
+    case "transcribe":
+      // Top-level audio transcription command
+      if args.count < 3 {
+        print("Usage: ikit transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]")
+        return
+      }
+
+      let audioPath = args[2]
+      guard FileManager.default.fileExists(atPath: audioPath) else {
+        Logger.error("❌ Audio file not found: \(audioPath)")
+        return
+      }
+
+      let engine = getStringParam("--engine") ?? "groq"
+      let language = getStringParam("--language") ?? "auto"
+
+      if engine == "groq" {
+        // Use Groq whisper-large-v3 via direct API call
+        let t = SecretaryTool()
+        if let text = await t.transcribeWithGroq(audioPath: audioPath, language: language) {
+          // Save to file
+          let outputPath = URL(fileURLWithPath: audioPath).deletingPathExtension()
+            .appendingPathExtension("txt").path
+          do {
+            try text.write(toFile: outputPath, atomically: true, encoding: .utf8)
+            Logger.info("💾 Saved to: \(outputPath)")
+            print("\n--- Transcription ---")
+            print(text)
+          } catch {
+            Logger.error("❌ Failed to save: \(error)")
+          }
+        }
+      } else {
+        // Use Python script (FunASR, WhisperX, etc.)
+        guard let python = configManager.current.python_path,
+          let script = configManager.current.transcribe_script
+        else {
+          Logger.error("Python/Script path not configured")
+          return
+        }
+
+        let out = URL(fileURLWithPath: audioPath).deletingPathExtension().appendingPathExtension("json")
+          .path
+        Logger.info("🎤 Transcribing (\(engine)): \(audioPath)")
+
+        var scriptArgs = [script, audioPath, "--output", out, "--engine", engine]
+        if language != "auto" {
+          scriptArgs.append("--language")
+          scriptArgs.append(language)
+        }
+
+        let result = Shell.run(python, args: scriptArgs)
+
+        if let output = result.output, !output.isEmpty {
+          for line in output.components(separatedBy: "\n") where !line.isEmpty {
+            print(line)
+          }
+        }
+
+        if result.exitCode == 0 {
+          if FileManager.default.fileExists(atPath: out) {
+            Logger.info("✅ Saved to: \(out)")
+          }
+        } else {
+          Logger.error("❌ Failed (exit code: \(result.exitCode))")
+        }
       }
 
     case "tts":
@@ -5949,7 +6246,7 @@ struct App {
     case "cal": helpText = "Calendar: list [--json], new <title> <YYYY-MM-DD HH:mm>, delete <title>"
     case "note":
       helpText =
-        "Note: sync [path] [--folder=NAME], ls [path] <folder> [--json], search [path] <keyword> [--folder=NAME] [--json], new/append/update/delete/move [path] <folder> <title> [<content>|<target-folder>]"
+        "Note: sync [path] [--folder=NAME] [--since=TIME], ls [path] <folder> [--json], search [path] <keyword> [--folder=NAME] [--json], new/append/update/delete/move [path] <folder> <title> [<content>|<target-folder>]"
     case "ocr": helpText = "OCR: <image-path> - Extract text from image file"
     case "photo":
       helpText =
@@ -5976,6 +6273,24 @@ struct App {
           ikit timer new --time 10:00 --weekday 1 --open agenda.md --open notes.txt
           ikit timer list
           ikit timer cancel timer-daily-0900
+        """
+    case "transcribe":
+      helpText = """
+        Transcribe: Audio-to-text using ASR engines
+          <audio-file> [--language zh|en|auto] [--engine groq|funasr]
+
+        Options:
+          --language <code>   Language code (zh, en, auto). Default: auto
+          --engine <name>     ASR engine (groq, funasr). Default: groq
+
+        Engines:
+          groq    Fast cloud-based whisper-large-v3 (requires API key)
+          funasr  Local FunASR model for Chinese (best accuracy, slower)
+
+        Examples:
+          ikit transcribe recording.m4a
+          ikit transcribe meeting.mp3 --language zh --engine groq
+          ikit transcribe call.wav --engine funasr
         """
     case "tts":
       helpText = """
@@ -6006,7 +6321,7 @@ struct App {
         """
     default:
       helpText =
-        "iKit v\(VERSION) | Usage: ikit [init|doctor|task|cal|note|photo|ocr|contact|sc|meet|timer|tts|config] [command] [args] [--json] [--id] [--dry-run] [--help] [-v]"
+        "iKit v\(VERSION) | Usage: ikit [init|doctor|task|cal|note|photo|ocr|contact|sc|meet|timer|transcribe|tts|config] [command] [args] [--json] [--id] [--dry-run] [--help] [-v]"
     }
     print(helpText)
   }

@@ -6,10 +6,51 @@ import argparse
 import time
 import logging
 import signal
+import atexit
 from functools import wraps
 from pathlib import Path
 
 import numpy as np
+
+# Global model reference for cleanup
+_global_model = None
+_global_cleanup_registered = False
+
+def cleanup_resources():
+    """
+    Cleanup global resources to prevent zombie processes.
+    Called automatically on exit via atexit.
+    """
+    global _global_model
+
+    if _global_model is not None:
+        logger.info("🧹 Cleaning up FunASR model resources...")
+        try:
+            # Explicit cleanup for FunASR model
+            if hasattr(_global_model, 'shutdown'):
+                _global_model.shutdown()
+            _global_model = None
+        except Exception as e:
+            logger.warning(f"⚠️ Error during model cleanup: {e}")
+
+    # Cleanup torch resources
+    try:
+        import torch
+        if hasattr(torch, 'cuda'):
+            torch.cuda.empty_cache()
+        # Force MPS cleanup
+        if hasattr(torch, 'mps'):
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+    except Exception:
+        pass
+
+def register_cleanup():
+    """Register cleanup handlers if not already registered."""
+    global _global_cleanup_registered
+    if not _global_cleanup_registered:
+        atexit.register(cleanup_resources)
+        _global_cleanup_registered = True
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -751,7 +792,12 @@ def get_funasr_model(device="mps", language="zh"):
         device: Device to use (mps, cpu, cuda)
         language: Language code ("zh" for Chinese, "en" for English)
     """
+    global _global_model
+
     from funasr import AutoModel
+
+    # Register cleanup on first model load
+    register_cleanup()
 
     if language == "en":
         # English model from ModelScope
@@ -783,6 +829,9 @@ def get_funasr_model(device="mps", language="zh"):
             disable_update=True,
             log_level="ERROR"
         )
+
+    # Store global reference for cleanup
+    _global_model = model
 
     return model
 
@@ -936,8 +985,105 @@ def transcribe_with_litellm(audio_path: str, litellm_url: str, litellm_model: st
         logger.error(f"❌ LiteLLM transcription failed: {e}")
         raise
 
+def transcribe_with_groq(audio_path: str, language: str = "auto", api_key: str = None) -> dict:
+    """
+    Transcribe audio using Groq's whisper-large-v3 via LiteLLM SDK.
+
+    This function uses litellm.transcription() to call Groq's ultra-fast
+    whisper-large-v3 model hosted on Groq's LPU inference engine.
+
+    Args:
+        audio_path: Path to audio file
+        language: Language code (zh, en, auto). Default: auto
+        api_key: Optional API key (if not set, will load from env)
+
+    Returns:
+        Dictionary with 'sentence_info' containing transcription results
+    """
+    try:
+        from litellm import transcription
+    except ImportError:
+        raise ImportError("litellm package is required for Groq engine. Install: pip install litellm")
+
+    logger.info(f"🚀 Using Groq whisper-large-v3 for transcription")
+    logger.info(f"   Audio: {Path(audio_path).name}")
+
+    # Try to load API key from LiteLLM config if not provided
+    if api_key is None:
+        # Check LiteLLM env file for Groq credentials
+        env_file = Path.home() / ".config" / "litellm" / "config" / ".env"
+        if env_file.exists():
+            import dotenv
+            env_vars = dotenv.dotenv_values(env_file)
+            api_key = env_vars.get("GROQ_API_KEY")
+
+        if api_key is None:
+            # Fallback to environment variable
+            api_key = os.environ.get("GROQ_API_KEY")
+
+    if api_key:
+        logger.info(f"   🔑 API Key: {api_key[:15]}...")
+
+    # Prepare language parameter for Groq
+    groq_language = None
+    if language == "zh":
+        groq_language = "zh"
+    elif language == "en":
+        groq_language = "en"
+    # For "auto", let Groq detect automatically
+
+    try:
+        with open(audio_path, 'rb') as audio_file:
+            logger.info(f"📡 Sending audio to Groq...")
+            response = transcription(
+                model="groq/whisper-large-v3",
+                file=audio_file,
+                language=groq_language,
+                api_key=api_key,
+                timeout=600  # 10 minute timeout
+            )
+
+        logger.info(f"✅ Transcription complete!")
+
+        # Convert to expected format
+        sentences = []
+        if hasattr(response, 'segments') and response.segments:
+            # Use detailed segments if available
+            for seg in response.segments:
+                sentences.append({
+                    'text': seg.get('text', '').strip(),
+                    'start': int(seg.get('start', 0) * 1000),  # Convert to ms
+                    'end': int(seg.get('end', 0) * 1000),
+                    'spk': 0,
+                    'track': 'groq'
+                })
+        elif hasattr(response, 'text'):
+            # Fallback: split text into sentences
+            text = response.text.strip()
+            # Simple split by common delimiters
+            import re
+            lines = re.split(r'[。！？.!?]\s*', text)
+            current_time = 0
+            for line in lines:
+                line = line.strip()
+                if line:
+                    sentences.append({
+                        'text': line,
+                        'start': current_time,
+                        'end': current_time + 5000,
+                        'spk': 0,
+                        'track': 'groq'
+                    })
+                    current_time += 5000
+
+        return {'sentence_info': sentences}
+
+    except Exception as e:
+        logger.error(f"❌ Groq transcription failed: {e}")
+        raise
+
 def main():
-    parser = argparse.ArgumentParser(description="iKit ASR Transcriber - FunASR + WhisperX + MLX + LiteLLM")
+    parser = argparse.ArgumentParser(description="iKit ASR Transcriber - FunASR + WhisperX + MLX + Groq")
     parser.add_argument("input_files", nargs='+', help="Path(s) to audio file(s)")
     parser.add_argument("--output", "-o", help="Path to save the output JSON", default=None)
     parser.add_argument("--device", "-d", help="Device to use (mps, cpu, cuda)", default=None)
@@ -968,9 +1114,19 @@ def main():
 
     def _timeout_handler(signum, frame):
         logger.error(f"❌ Transcription timed out after {timeout_seconds}s")
+        # Cleanup before exit
+        cleanup_resources()
         sys.exit(124)  # Standard timeout exit code
 
+    # Handle SIGTERM for graceful shutdown
+    def _sigterm_handler(signum, frame):
+        logger.info("🛑 Received termination signal, cleaning up...")
+        cleanup_resources()
+        sys.exit(0)
+
+    # Register signal handlers
     signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     signal.alarm(timeout_seconds)
 
     # Check dependencies
