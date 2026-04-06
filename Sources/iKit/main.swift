@@ -2653,21 +2653,20 @@ class NotesBridge: NSObject {
 
   func listAllNotesSafe() -> [(id: String, name: String, path: String, modDate: Date?)] {
     Logger.info("⏳ Fetching all notes from Apple Notes...")
-    // 使用更快的方案：一次性获取所有笔记，而不是逐个调用
+    // 优化方案：分两步执行
+    // 1. 先构建文件夹 ID→路径 映射表（只遍历文件夹一次）
+    // 2. 再获取所有笔记，直接查映射表（不再递归）
     let script = """
       tell application "Notes"
           if (count of accounts) = 0 then return ""
           set targetAccount to first account
           try
-              set allNotes to every note of targetAccount
-              set resultList to {}
-              repeat with n in allNotes
-                  set nid to id of n
-                  set nname to name of n
-                  set d to modification date of n
-                  set dStr to (year of d as string) & "-" & (month of d as integer as string) & "-" & (day of d as string) & " " & (hours of d as string) & ":" & (minutes of d as string) & ":" & (seconds of d as string)
-
-                  set currentFolder to container of n
+              -- Step 1: Build folder ID -> path mapping
+              set folderMap to {}
+              set allFolders to every folder of targetAccount
+              repeat with aFolder in allFolders
+                  set folderId to id of aFolder
+                  set currentFolder to aFolder
                   set folderPath to name of currentFolder
                   repeat while container of currentFolder is not missing value
                       set parentContainer to container of currentFolder
@@ -2678,6 +2677,30 @@ class NotesBridge: NSObject {
                           exit repeat
                       end if
                   end repeat
+                  set end of folderMap to folderId & ":::" & folderPath
+              end repeat
+
+              -- Step 2: Get all notes and lookup folder path from map
+              set allNotes to every note of targetAccount
+              set resultList to {}
+              repeat with n in allNotes
+                  set nid to id of n
+                  set nname to name of n
+                  set d to modification date of n
+                  set dStr to (year of d as string) & "-" & (month of d as integer as string) & "-" & (day of d as string) & " " & (hours of d as string) & ":" & (minutes of d as string) & ":" & (seconds of d as string)
+
+                  set noteContainer to container of n
+                  set containerId to id of noteContainer
+                  set folderPath to "Unknown"
+
+                  -- Lookup folder path from map (O(1) instead of recursive traversal)
+                  repeat with mapEntry in folderMap
+                      if mapEntry starts with containerId then
+                          set folderPath to text ((offset of ":::" in mapEntry) + 3) thru -1 of mapEntry
+                          exit repeat
+                      end if
+                  end repeat
+
                   set end of resultList to nid & "|||" & nname & "|||" & folderPath & "|||" & dStr
               end repeat
               set AppleScript's text item delimiters to "###"
@@ -2687,7 +2710,7 @@ class NotesBridge: NSObject {
           end try
       end tell
       """
-    guard let out = executeAppleScript(script, timeout: 120), !out.isEmpty else { return [] }
+    guard let out = executeAppleScript(script, timeout: 180), !out.isEmpty else { return [] }
     if out.starts(with: "Error:") {
       Logger.debug(out)
       return []
@@ -3206,8 +3229,23 @@ class NotesTool {
       Logger.info("🚀 Custom incremental check since: \(checkDate)")
       notes = bridge.listRecentlyModified(since: checkDate)
     } else if !hasHistory {
-      Logger.info("🐢 First run detected. Fetching all notes...")
-      notes = bridge.listAllNotesSafe()
+      // First run: use folder-by-folder approach to avoid timeout
+      Logger.info("🐢 First run detected. Syncing folder-by-folder...")
+      let folders = bridge.listFoldersWithIds()
+      Logger.info("📂 Found \(folders.count) folders")
+
+      var allNotes: [(id: String, name: String, path: String, modDate: Date?)] = []
+      for (fid, folderPath) in folders {
+        if folderPath.isEmpty { continue }
+        // Skip system folders
+        if ["Recently Deleted", "Quick Notes"].contains(folderPath) { continue }
+
+        Logger.info("  📁 Syncing folder: \(folderPath)")
+        let folderNotes = bridge.listNotesInFolder(folderName: folderPath)
+        allNotes.append(contentsOf: folderNotes)
+      }
+      notes = allNotes
+      Logger.info("✅ Total: \(notes.count) notes from all folders")
     } else {
       let checkDate = lastSync.addingTimeInterval(-60)
       Logger.info("🚀 Incremental check since: \(checkDate)")
