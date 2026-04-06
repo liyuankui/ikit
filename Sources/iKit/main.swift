@@ -2,13 +2,13 @@ import AVFoundation
 import AudioToolbox
 import Cocoa
 import Contacts
+import Darwin
 import EventKit
 import Foundation
 import IOKit
 import Photos
 import ScreenCaptureKit
 import Speech
-import Darwin
 import SwiftEdgeTTS
 import Vision
 
@@ -153,7 +153,8 @@ class TranscriptionManager {
     let remainingCount = activeProcesses.count
     lock.unlock()
 
-    Logger.warn("⚠️  Timeout waiting for transcriptions (\(Int(timeout))s), \(remainingCount) still active")
+    Logger.warn(
+      "⚠️  Timeout waiting for transcriptions (\(Int(timeout))s), \(remainingCount) still active")
     return false
   }
 
@@ -2594,7 +2595,8 @@ class NotesBridge: NSObject {
         let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
         let html = String(data: outputData, encoding: .utf8) ?? markdown
         // Remove newlines for AppleScript compatibility
-        return html.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "\r", with: "")
+        return html.replacingOccurrences(of: "\n", with: "").replacingOccurrences(
+          of: "\r", with: "")
       } else {
         Logger.warn("⚠️  Pandoc conversion failed, using raw content")
         return markdown
@@ -2603,6 +2605,50 @@ class NotesBridge: NSObject {
       Logger.warn("⚠️  Failed to run pandoc: \(error), using raw content")
       return markdown
     }
+  }
+
+  /// List notes in a specific folder (much faster than filtering all notes)
+  func listNotesInFolder(folderName: String) -> [(
+    id: String, name: String, path: String, modDate: Date?
+  )] {
+    Logger.info("⏳ Fetching notes from folder '\(folderName)'...")
+    let script = """
+      tell application "Notes"
+          if (count of accounts) = 0 then return ""
+          set targetAccount to first account
+          try
+              set targetFolder to folder "\(folderName)" of targetAccount
+              set noteList to every note in targetFolder
+              set resultList to {}
+              repeat with n in noteList
+                  set nid to id of n
+                  set nname to name of n
+                  set d to modification date of n
+                  set dStr to (year of d as string) & "-" & (month of d as integer as string) & "-" & (day of d as string) & " " & (hours of d as string) & ":" & (minutes of d as string) & ":" & (seconds of d as string)
+                  set end of resultList to nid & "|||" & nname & "|||" & "\(folderName)" & "|||" & dStr
+              end repeat
+              set AppleScript's text item delimiters to "###"
+              return resultList as string
+          on error err
+              return "Error: " & err
+          end try
+      end tell
+      """
+    guard let out = executeAppleScript(script, timeout: 30), !out.isEmpty else { return [] }
+    if out.starts(with: "Error:") {
+      Logger.debug(out)
+      return []
+    }
+
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-M-d H:m:s"
+    let results = out.components(separatedBy: "###").filter { !$0.isEmpty }.compactMap { item in
+      let p = item.components(separatedBy: "|||")
+      return p.count >= 4 ? (p[0], p[1], p[2], f.date(from: p[3])) : nil
+    }
+
+    Logger.info("✅ Fetched \(results.count) notes from '\(folderName)'")
+    return results
   }
 
   func listAllNotesSafe() -> [(id: String, name: String, path: String, modDate: Date?)] {
@@ -3140,7 +3186,8 @@ class NotesTool {
         Logger.info("⏰ Using custom time: \(parsedDate) (from: \(sinceExpr))")
       } else {
         Logger.error("❌ Failed to parse time expression: \(sinceExpr)")
-        Logger.error("   Supported formats: \"4 hours ago\", \"-2h\", \"2026-03-14 12:00\", \"yesterday\"")
+        Logger.error(
+          "   Supported formats: \"4 hours ago\", \"-2h\", \"2026-03-14 12:00\", \"yesterday\"")
         return
       }
     }
@@ -3148,7 +3195,11 @@ class NotesTool {
     var notes: [(id: String, name: String, path: String, modDate: Date?)]
 
     // Use customSince if provided, otherwise use file-based lastSync
-    if let custom = customSince {
+    if let filter = folderFilter {
+      // Fast path: directly query folder in AppleScript (avoid fetching all notes)
+      Logger.info("📁 Fast path: querying folder '\(filter)' directly...")
+      notes = bridge.listNotesInFolder(folderName: filter)
+    } else if let custom = customSince {
       // Custom time override
       hasHistory = true  // Treat as incremental sync
       let checkDate = custom.addingTimeInterval(-60)
@@ -3161,12 +3212,6 @@ class NotesTool {
       let checkDate = lastSync.addingTimeInterval(-60)
       Logger.info("🚀 Incremental check since: \(checkDate)")
       notes = bridge.listRecentlyModified(since: checkDate)
-    }
-
-    // Apply folder filter if specified
-    if let filter = folderFilter {
-      notes = notes.filter { $0.path.localizedCaseInsensitiveContains(filter) }
-      Logger.info("📁 Filtered to \(notes.count) notes in '\(filter)'")
     }
 
     if !notes.isEmpty {
@@ -5339,7 +5384,8 @@ class SecretaryTool {
 
     // Build multipart form data boundary
     let boundary = "Boundary-\(UUID().uuidString)"
-    request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+    request.setValue(
+      "multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
     var body = Data()
 
@@ -5372,7 +5418,8 @@ class SecretaryTool {
 
     // Add response_format field
     body.append("--\(boundary)\r\n".data(using: .utf8)!)
-    body.append("Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".data(using: .utf8)!)
+    body.append(
+      "Content-Disposition: form-data; name=\"response_format\"\r\n\r\n".data(using: .utf8)!)
     body.append("verbose_json\r\n".data(using: .utf8)!)
 
     body.append("--\(boundary)--\r\n".data(using: .utf8)!)
@@ -5642,7 +5689,9 @@ struct App {
         return
       }
       if sub == "sync" {
-        t.sync(targetDir: root, folderFilter: getStringParam("--folder"), since: getStringParam("--since"))
+        t.sync(
+          targetDir: root, folderFilter: getStringParam("--folder"),
+          since: getStringParam("--since"))
       } else if sub == "ls" && args.count > 4 {
         let json = args.contains("--json")
         t.list(folder: args[4], json: json)
@@ -5936,8 +5985,10 @@ struct App {
 
       // Progressive --help: no audio file provided
       if args.count < 3 {
-        print(agentError("transcribe: usage: transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]",
-                        suggestion: "ikit transcribe meeting.m4a --engine groq"))
+        print(
+          agentError(
+            "transcribe: usage: transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]",
+            suggestion: "ikit transcribe meeting.m4a --engine groq"))
         print("[exit:1 | 0ms]")
         return
       }
@@ -5946,7 +5997,10 @@ struct App {
 
       // Validate file exists with remediation
       guard FileManager.default.fileExists(atPath: audioPath) else {
-        let suggestion = FileManager.default.fileExists(atPath: audioPath + ".m4a") ? "Did you mean: \(audioPath).m4a?" : "Check file path with: ls -l \(audioPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
+        let suggestion =
+          FileManager.default.fileExists(atPath: audioPath + ".m4a")
+          ? "Did you mean: \(audioPath).m4a?"
+          : "Check file path with: ls -l \(audioPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
         print(agentError("Audio file not found: \(audioPath)", suggestion: suggestion))
         print("[exit:1 | 0ms]")
         return
@@ -5976,12 +6030,20 @@ struct App {
             agentOutput("Saved to: \(outputPath)", exitCode: 0, duration: duration)
           } catch {
             let duration = Date().timeIntervalSince(startDate)
-            print(agentError("Failed to save: \(error.localizedDescription)", suggestion: "Check directory permissions: ls -la \(outputPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"))
+            print(
+              agentError(
+                "Failed to save: \(error.localizedDescription)",
+                suggestion:
+                  "Check directory permissions: ls -la \(outputPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
+              ))
             print("[exit:1 | \(formatDuration(duration))]")
           }
         } else {
           let duration = Date().timeIntervalSince(startDate)
-          print(agentError("Transcription failed", suggestion: "Check GROQ_API_KEY in config or try: --engine funasr"))
+          print(
+            agentError(
+              "Transcription failed",
+              suggestion: "Check GROQ_API_KEY in config or try: --engine funasr"))
           print("[exit:1 | \(formatDuration(duration))]")
         }
       } else {
@@ -5989,13 +6051,18 @@ struct App {
         guard let python = configManager.current.python_path,
           let script = configManager.current.transcribe_script
         else {
-          print(agentError("Python/Script path not configured", suggestion: "Run: ikit config && set python_path and transcribe_script"))
+          print(
+            agentError(
+              "Python/Script path not configured",
+              suggestion: "Run: ikit config && set python_path and transcribe_script"))
           print("[exit:1 | 0ms]")
           return
         }
 
-        let out = URL(fileURLWithPath: audioPath).deletingPathExtension().appendingPathExtension("json")
-          .path
+        let out = URL(fileURLWithPath: audioPath).deletingPathExtension().appendingPathExtension(
+          "json"
+        )
+        .path
 
         var scriptArgs = [script, audioPath, "--output", out, "--engine", engine]
         if language != "auto" {
@@ -6023,7 +6090,10 @@ struct App {
             agentOutput("Transcription complete", exitCode: 0, duration: duration)
           }
         } else {
-          print(agentError("Transcription failed (exit \(result.exitCode))", suggestion: "Check Python script logs or try: --engine groq"))
+          print(
+            agentError(
+              "Transcription failed (exit \(result.exitCode))",
+              suggestion: "Check Python script logs or try: --engine groq"))
           print("[exit:\(result.exitCode) | \(formatDuration(duration))]")
         }
       }
@@ -6035,8 +6105,10 @@ struct App {
 
       // Progressive --help: no markdown file provided
       if args.count < 3 {
-        print(agentError("tts: usage: tts <markdown-file> [-o output.mp3] [--voice NAME] [--preview] [--streaming]",
-                        suggestion: "ikit tts README.md -o intro.mp3 --voice zh-CN-XiaoxiaoNeural"))
+        print(
+          agentError(
+            "tts: usage: tts <markdown-file> [-o output.mp3] [--voice NAME] [--preview] [--streaming]",
+            suggestion: "ikit tts README.md -o intro.mp3 --voice zh-CN-XiaoxiaoNeural"))
         print("[exit:1 | 0ms]")
         return
       }
@@ -6045,7 +6117,9 @@ struct App {
 
       // Validate file exists with remediation
       guard FileManager.default.fileExists(atPath: mdFile) else {
-        let suggestion = mdFile.hasSuffix(".md") ? "Check file path: ls -l \(mdFile)" : "Markdown files must have .md extension"
+        let suggestion =
+          mdFile.hasSuffix(".md")
+          ? "Check file path: ls -l \(mdFile)" : "Markdown files must have .md extension"
         print(agentError("File not found: \(mdFile)", suggestion: suggestion))
         print("[exit:1 | 0ms]")
         return
@@ -6053,7 +6127,10 @@ struct App {
 
       // Read and clean markdown content
       guard let content = try? String(contentsOfFile: mdFile, encoding: .utf8) else {
-        print(agentError("Failed to read file: \(mdFile)", suggestion: "Check file encoding (must be UTF-8) and permissions"))
+        print(
+          agentError(
+            "Failed to read file: \(mdFile)",
+            suggestion: "Check file encoding (must be UTF-8) and permissions"))
         print("[exit:1 | 0ms]")
         return
       }
@@ -6068,8 +6145,14 @@ struct App {
       for line in lines {
         if line.trimmingCharacters(in: .whitespaces).hasPrefix("---") {
           yamlCount += 1
-          if yamlCount == 1 { inYaml = true; continue }
-          if yamlCount == 2 { inYaml = false; continue }
+          if yamlCount == 1 {
+            inYaml = true
+            continue
+          }
+          if yamlCount == 2 {
+            inYaml = false
+            continue
+          }
         }
         if inYaml { continue }
         if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
@@ -6078,7 +6161,8 @@ struct App {
         }
         if inCodeBlock { continue }
         // Remove markdown symbols
-        var cleaned = line
+        var cleaned =
+          line
           .replacingOccurrences(of: "^#{1,6}\\s*", with: "", options: .regularExpression)
           .replacingOccurrences(of: "\\*\\*", with: "", options: .regularExpression)
           .replacingOccurrences(of: "__", with: "", options: .regularExpression)
@@ -6133,7 +6217,9 @@ struct App {
       var index = cleanedText.startIndex
 
       while index < cleanedText.endIndex {
-        let end = cleanedText.index(index, offsetBy: maxChunkLength, limitedBy: cleanedText.endIndex) ?? cleanedText.endIndex
+        let end =
+          cleanedText.index(index, offsetBy: maxChunkLength, limitedBy: cleanedText.endIndex)
+          ?? cleanedText.endIndex
         chunks.append(String(cleanedText[index..<end]))
         index = end
       }
@@ -6168,7 +6254,7 @@ struct App {
           chunkFiles.append(chunkURL)
 
           // 短暂延迟，避免请求过快
-          try await Task.sleep(nanoseconds: 500_000_000) // 0.5秒
+          try await Task.sleep(nanoseconds: 500_000_000)  // 0.5秒
         } catch {
           print("[stderr] Chunk \(index + 1) failed: \(error)")
         }
@@ -6176,7 +6262,9 @@ struct App {
 
       if chunkFiles.isEmpty {
         let duration = Date().timeIntervalSince(startDate)
-        print(agentError("No audio data generated", suggestion: "Check voice name with: ikit tts --help"))
+        print(
+          agentError(
+            "No audio data generated", suggestion: "Check voice name with: ikit tts --help"))
         print("[exit:1 | \(formatDuration(duration))]")
         return
       }
@@ -6187,7 +6275,9 @@ struct App {
       }
 
       let playCmd = "mpv " + chunkFiles.map { $0.path }.joined(separator: " ")
-      agentOutput("TTS: \(chunkFiles.count) files. Play: \(playCmd)", exitCode: 0, duration: Date().timeIntervalSince(startDate))
+      agentOutput(
+        "TTS: \(chunkFiles.count) files. Play: \(playCmd)", exitCode: 0,
+        duration: Date().timeIntervalSince(startDate))
 
     default: printHelp(for: nil)
     }
@@ -6368,17 +6458,20 @@ struct App {
   }
 
   /// Unified JSON output wrapper
-  static func jsonOutput(_ data: [String: Any], exitCode: Int = 0, duration: TimeInterval = 0) -> String {
+  static func jsonOutput(_ data: [String: Any], exitCode: Int = 0, duration: TimeInterval = 0)
+    -> String
+  {
     var output: [String: Any] = [
       "status": exitCode == 0 ? "success" : "error",
       "data": data,
       "metadata": [
         "exit": exitCode,
-        "duration_ms": Int(duration * 1000)
-      ]
+        "duration_ms": Int(duration * 1000),
+      ],
     ]
     if let json = try? JSONSerialization.data(withJSONObject: output, options: .prettyPrinted),
-       let jsonStr = String(data: json, encoding: .utf8) {
+      let jsonStr = String(data: json, encoding: .utf8)
+    {
       return jsonStr
     }
     return "{}"
@@ -6468,31 +6561,31 @@ struct App {
         """
     default:
       helpText = """
-iKit v\(VERSION) - Apple Ecosystem CLI for Agents
+        iKit v\(VERSION) - Apple Ecosystem CLI for Agents
 
-Apple Data:
-  notes      — Notes (sync, list, search, create, update, delete, move, read)
-  tasks      — Reminders (list, create, complete, delete)
-  calendar   — Calendar (list, create, delete)
-  photos     — Photos (list, ocr, search)
-  contacts   — Contacts (search)
+        Apple Data:
+          notes      — Notes (sync, list, search, create, update, delete, move, read)
+          tasks      — Reminders (list, create, complete, delete)
+          calendar   — Calendar (list, create, delete)
+          photos     — Photos (list, ocr, search)
+          contacts   — Contacts (search)
 
-Productivity:
-  meet       — Meeting recording (start, transcribe, process)
-  timer      — Timers (new, list, cancel, logs)
+        Productivity:
+          meet       — Meeting recording (start, transcribe, process)
+          timer      — Timers (new, list, cancel, logs)
 
-AI/Media:
-  transcribe — ASR transcription (groq, funasr)
-  tts        — Text-to-Speech for Markdown
-  ocr        — Image OCR
+        AI/Media:
+          transcribe — ASR transcription (groq, funasr)
+          tts        — Text-to-Speech for Markdown
+          ocr        — Image OCR
 
-System:
-  config     — Configuration management
-  doctor     — System health check
-  init       — Initialize iKit
+        System:
+          config     — Configuration management
+          doctor     — System health check
+          init       — Initialize iKit
 
-Use 'ikit <module> --help' for details.
-"""
+        Use 'ikit <module> --help' for details.
+        """
     }
     print(helpText)
   }
