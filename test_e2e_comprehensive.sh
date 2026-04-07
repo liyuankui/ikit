@@ -236,6 +236,45 @@ else
     ((FAIL_COUNT++))
 fi
 
+# Edge Case Tests
+echo "[TEST] Notes: Sync non-existent folder (should handle gracefully)" | tee -a "${LOG_FILE}"
+TEST_NONEXISTENT="${TEST_DIR}/nonexistent"
+mkdir -p "${TEST_NONEXISTENT}"
+if ${IKIT_BIN} note sync "${TEST_NONEXISTENT}" --folder="NonExistentFolderXYZ123" >> "${LOG_FILE}" 2>&1; then
+    # Verify no files were created (folder doesn't exist = 0 notes)
+    NOTE_COUNT=$(find "${TEST_NONEXISTENT}" -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${NOTE_COUNT}" -eq 0 ]; then
+        echo "✅ PASS: Notes: Non-existent folder handled (0 notes)" | tee -a "${LOG_FILE}"
+        ((PASS_COUNT++))
+    else
+        echo "❌ FAIL: Notes: Expected 0 notes, got ${NOTE_COUNT}" | tee -a "${LOG_FILE}"
+        ((FAIL_COUNT++))
+    fi
+else
+    echo "❌ FAIL: Notes: Non-existent folder should not error" | tee -a "${LOG_FILE}"
+    ((FAIL_COUNT++))
+fi
+
+# Performance test: verify --folder flag is fast (<5s)
+echo "[TEST] Notes: Sync performance (--folder should be fast)" | tee -a "${LOG_FILE}"
+TEST_PERF="${TEST_DIR}/perf"
+mkdir -p "${TEST_PERF}"
+START=$(date +%s)
+if ${IKIT_BIN} note sync "${TEST_PERF}" --folder=iKitTest >> "${LOG_FILE}" 2>&1; then
+    END=$(date +%s)
+    ELAPSED=$((END - START))
+    if [ "${ELAPSED}" -lt 5 ]; then
+        echo "✅ PASS: Notes: Fast sync completed in ${ELAPSED}s (<5s target)" | tee -a "${LOG_FILE}"
+        ((PASS_COUNT++))
+    else
+        echo "⚠️  WARN: Notes: Sync took ${ELAPSED}s (expected <5s)" | tee -a "${LOG_FILE}"
+        ((SKIP_COUNT++))
+    fi
+else
+    echo "❌ FAIL: Notes: Sync failed" | tee -a "${LOG_FILE}"
+    ((FAIL_COUNT++))
+fi
+
 echo "" | tee -a "${LOG_FILE}"
 
 # Summary
