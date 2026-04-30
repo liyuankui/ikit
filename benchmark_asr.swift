@@ -22,6 +22,11 @@ import Foundation
 import Speech
 import AVFoundation
 
+// MARK: - Configuration
+
+/// Test data directory - update this path to your sample recordings
+let testDataDirectory = "/path/to/your/recordings"
+
 // MARK: - Test Result Models
 
 struct BenchmarkResult: Codable {
@@ -377,7 +382,7 @@ func main() async throws {
         BenchmarkConfig.TestSample(
             name: "Sample A - Standard",
             type: .standard,
-            audioPath: URL(fileURLWithPath: "~/recordings/2026-01-13T022917Z_sys.m4a"),
+            audioPath: URL(fileURLWithPath: "\(testDataDirectory)/sample_a_sys.m4a"),
             expectedEntities: ["Happy New Year", "China", "Swedish"],
             description: "Two-person conversation, clear speech, no overlap"
         ),
@@ -385,7 +390,7 @@ func main() async throws {
         BenchmarkConfig.TestSample(
             name: "Sample B - Hell Mode",
             type: .hellMode,
-            audioPath: URL(fileURLWithPath: "~/recordings/sample_b/2026-01-13T052816Z_mic.m4a"),
+            audioPath: URL(fileURLWithPath: "\(testDataDirectory)/sample_b_mic.m4a"),
             expectedEntities: ["ROI", "retention", "churn", "Kubernetes", "Docker"],
             description: "Chinglish + overlapping + noise"
         ),
@@ -393,7 +398,7 @@ func main() async throws {
         BenchmarkConfig.TestSample(
             name: "Sample C - Echo Test",
             type: .echoTest,
-            audioPath: URL(fileURLWithPath: "~/recordings/sample_c/2026-01-13T052912Z_mic.m4a"),
+            audioPath: URL(fileURLWithPath: "\(testDataDirectory)/sample_c_mic.m4a"),
             expectedEntities: ["Kubernetes", "Docker", "Jenkins", "deployment"],
             description: "No gating - echo present"
         ),

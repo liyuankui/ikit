@@ -4656,6 +4656,10 @@ class TimerTool {
     isDaily: Bool,
     script: String
   ) -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let ikitPath = "\(home)/.local/bin/ikit"
+    let logsDir = "\(home)/Library/Logs/com.user.ikit.timer"
+
     var interval = ""
 
     if isDaily {
@@ -4710,7 +4714,7 @@ class TimerTool {
 
           <key>ProgramArguments</key>
           <array>
-              <string>~/.local/bin/ikit</string>
+              <string>\(ikitPath)</string>
               <string>timer</string>
               <string>execute</string>
               <string>\(taskName)</string>
@@ -4719,9 +4723,9 @@ class TimerTool {
           <key>RunAtLoad</key>
           <false/>
           <key>StandardOutPath</key>
-          <string>~/Library/Logs/com.user.ikit.timer/\(taskName).stdout.log</string>
+          <string>\(logsDir)/\(taskName).stdout.log</string>
           <key>StandardErrorPath</key>
-          <string>~/Library/Logs/com.user.ikit.timer/\(taskName).stderr.log</string>
+          <string>\(logsDir)/\(taskName).stderr.log</string>
 
       </dict>
       </plist>
@@ -6730,7 +6734,7 @@ struct App {
 
         Examples:
           ikit timer new --time 09:00 --daily --title "Daily Standup"
-          ikit timer resume --time 16:30 --session abc123 --pwd ~/Work/iKit --title "Continue coding"
+          ikit timer resume --time 16:30 --session abc123 --pwd ~/Work/project --title "Continue coding"
           ikit timer new --time 10:00 --weekday 1 --open agenda.md --open notes.txt
           ikit timer list
           ikit timer cancel timer-daily-0900

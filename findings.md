@@ -96,8 +96,8 @@ if intervalStr.hasSuffix("m") || intervalStr.hasSuffix("M") {
 ## Resources
 
 ### 相关文件
-- `~/Work/iKit/Sources/iKit/main.swift` - 主代码文件（~2400 行）
-- `~/Work/iKit/ikit-meet-daemon-reliability-proposal.md` - 可靠性提案
+- `Sources/iKit/main.swift` - 主代码文件（~2400 行）
+- `ikit-meet-daemon-reliability-proposal.md` - 可靠性提案
 - `~/.config/ikit/meet.pid` - PID 文件位置（待创建）
 - `~/.config/ikit/config.json` - 配置文件
 
