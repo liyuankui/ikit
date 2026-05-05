@@ -5,7 +5,7 @@ import Contacts
 import Darwin
 import EventKit
 import Foundation
-import HealthKit
+// import HealthKit  // Removed: causes Signal 9 in CLI without App Bundle (issue #17)
 import IOKit
 import Photos
 import ScreenCaptureKit
@@ -960,6 +960,19 @@ class SystemRecorder: NSObject, SCStreamOutput {
 
     try await stream?.startCapture()
     Logger.info("✅ SystemRecorder: Capture started successfully")
+
+    // Issue #18: Detect silent permission failure
+    // If no audio samples arrive within 5 seconds, Screen Recording permission is likely missing
+    Task {
+      try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 seconds
+      if self.audioSampleCount == 0 {
+        Logger.error("❌ Screen Recording 权限未授予，系统音频无法录制")
+        Logger.error("   5 秒内未收到任何音频样本")
+        Logger.error("   请前往: System Settings → Privacy & Security → Screen Recording → 授权当前应用")
+        Logger.error("   授权后需重启启动应用")
+        Logger.warn("⚠️  当前仅麦克风录音可用，aggressive_gating 将无法工作")
+      }
+    }
   }
 
   func stop() async {
@@ -3984,155 +3997,17 @@ class ShortcutsTool {
 }
 
 // MARK: - Health Tool
+// HealthKit removed: causes Signal 9 in CLI without App Bundle (issue #17)
+// HealthKit requires an App Bundle with proper entitlements for TCC authorization.
+// CLI binaries cannot receive user consent prompts from macOS.
 class HealthTool {
-  let healthStore = HKHealthStore()
-
-  enum HealthDataType: String, CaseIterable {
-    case steps = "steps"
-    case distance = "distance"
-    case activeEnergy = "activeEnergy"
-    case heartRate = "heartRate"
-    case restingHeartRate = "restingHeartRate"
-
-    var hkType: HKQuantityType? {
-      switch self {
-      case .steps: return HKQuantityType.quantityType(forIdentifier: .stepCount)
-      case .distance: return HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning)
-      case .activeEnergy: return HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)
-      case .heartRate: return HKQuantityType.quantityType(forIdentifier: .heartRate)
-      case .restingHeartRate: return HKQuantityType.quantityType(forIdentifier: .restingHeartRate)
-      }
-    }
-
-    var displayName: String {
-      switch self {
-      case .steps: return "步数"
-      case .distance: return "距离"
-      case .activeEnergy: return "活动能量"
-      case .heartRate: return "心率"
-      case .restingHeartRate: return "静息心率"
-      }
-    }
-
-    var unit: HKUnit {
-      switch self {
-      case .steps: return HKUnit.count()
-      case .distance: return HKUnit.meter()
-      case .activeEnergy: return HKUnit.kilocalorie()
-      case .heartRate, .restingHeartRate: return HKUnit(from: "count/min")
-      }
-    }
-  }
-
-  func checkAvailability() -> Bool {
-    guard HKHealthStore.isHealthDataAvailable() else {
-      print("❌ HealthKit is not available on this device")
-      print("")
-      print("Note: HealthKit on macOS requires:")
-      print("  1. macOS 13+ (Ventura or later)")
-      print("  2. App entitlements in Entitlements.plist")
-      print("  3. Health data synced from iPhone/iWatch to iCloud")
-      print("")
-      print("For CLI tools, HealthKit access is limited. Consider using iOS/iPadOS for full HealthKit functionality.")
-      return false
-    }
-    return true
-  }
-
-  func listTypes() {
-    Logger.info("Available health data types:")
-    for t in HealthDataType.allCases {
-      print("  \(t.rawValue) - \(t.displayName)")
-    }
-  }
-
-  func getTodaySummary(type: HealthDataType) {
-    guard checkAvailability() else { return }
-    guard let hkType = type.hkType else { return }
-
-    // 请求权限并查询数据
-    let calendar = Calendar.current
-    let now = Date()
-    guard let startOfDay = calendar.startOfDay(for: now) as Date? else { return }
-
-    let predicate = HKQuery.predicateForSamples(withStart: startOfDay, end: now, options: .strictStartDate)
-
-    let query = HKSampleQuery(
-      sampleType: hkType,
-      predicate: predicate,
-      limit: HKObjectQueryNoLimit,
-      sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: false)]
-    ) {
-      query, samples, error in
-
-      if let error = error {
-        Logger.error("Query failed: \(error.localizedDescription)")
-        return
-      }
-
-      guard let samples = samples as? [HKQuantitySample] else {
-        Logger.info("No \(type.displayName) data found for today")
-        return
-      }
-
-      // 计算今日总量
-      let total = samples.reduce(0.0) { sum, sample in
-        sum + sample.quantity.doubleValue(for: type.unit)
-      }
-
-      // 显示结果
-      let formatter = DateFormatter()
-      formatter.dateStyle = .short
-      Logger.info("今日\(type.displayName): \(Int(total)) \(type.unit.unitString)")
-    }
-
-    healthStore.execute(query)
-  }
-
-  func getRecentData(type: HealthDataType, hours: Int = 1) {
-    guard checkAvailability() else { return }
-    guard let hkType = type.hkType else { return }
-
-    let calendar = Calendar.current
-    let now = Date()
-    guard let startTime = calendar.date(byAdding: .hour, value: -hours, to: now) else { return }
-
-    let predicate = HKQuery.predicateForSamples(withStart: startTime, end: now, options: .strictStartDate)
-
-    let query = HKSampleQuery(
-      sampleType: hkType,
-      predicate: predicate,
-      limit: HKObjectQueryNoLimit,
-      sortDescriptors: [NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)]
-    ) {
-      query, samples, error in
-
-      if let error = error {
-        Logger.error("Query failed: \(error.localizedDescription)")
-        return
-      }
-
-      guard let samples = samples as? [HKQuantitySample] else {
-        Logger.info("No \(type.displayName) data found in the last \(hours) hour(s)")
-        return
-      }
-
-      let formatter = DateFormatter()
-      formatter.dateFormat = "HH:mm"
-
-      Logger.info("最近 \(hours) 小时的 \(type.displayName) 数据 (\(samples.count) 条记录):")
-
-      for sample in samples {
-        let value = sample.quantity.doubleValue(for: type.unit)
-        let time = formatter.string(from: sample.startDate)
-        print("  \(time) - \(String(format: "%.1f", value)) \(type.unit.unitString)")
-      }
-    }
-
-    healthStore.execute(query)
+  func requestAuthorization() {
+    print("❌ HealthKit is not available in CLI mode")
+    print("   HealthKit requires an App Bundle with proper entitlements.")
+    print("   CLI binaries cannot receive TCC authorization prompts from macOS.")
+    print("   Use iPhone/Apple Watch Health app or a native macOS app instead.")
   }
 }
-
 // MARK: - Shell Helper
 class Shell {
   static func run(_ command: String, args: [String]) -> (
@@ -5755,6 +5630,32 @@ struct App {
       print("🔍 iKit 系统检查")
       print("")
 
+      // 检查 ffmpeg (required for FunASR transcription)
+      let ffmpegResult = Shell.run("/usr/bin/which", args: ["ffmpeg"])
+      if ffmpegResult.exitCode == 0 {
+        print("✅ ffmpeg: \(ffmpegResult.output?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "已安装")")
+      } else {
+        print("❌ ffmpeg: 未安装")
+        print("     需要: brew install ffmpeg")
+        print("     (FunASR 转录依赖 ffmpeg 进行音频格式转换)")
+      }
+
+      // 检查 Screen Recording 权限
+      let screenCheckResult = Shell.run("/usr/bin/swift", args: ["-e", """
+        import ScreenCaptureKit
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        print("OK")
+        """])
+      if screenCheckResult.exitCode == 0 && screenCheckResult.output?.contains("OK") == true {
+        print("✅ Screen Recording: 已授权")
+      } else {
+        print("⚠️  Screen Recording: 可能未授权")
+        print("     请前往: System Settings → Privacy & Security → Screen Recording")
+        print("     授权当前终端应用，否则 meet 录音将无法捕获系统音频")
+      }
+
+      print("")
+
       // 检查 Python
       let pythonPath = configManager.current.python_path ?? "python3"
       let pythonVersion = Shell.run(pythonPath, args: ["--version"])
@@ -6481,28 +6382,7 @@ struct App {
 
     case "health":
       let h = HealthTool()
-      if sub == "types" {
-        h.listTypes()
-      } else if sub == "today" && args.count > 3 {
-        let typeName = args[3]
-        if let type = HealthTool.HealthDataType(rawValue: typeName) {
-          h.getTodaySummary(type: type)
-        } else {
-          Logger.error("Unknown type: \(typeName)")
-          h.listTypes()
-        }
-      } else if sub == "recent" && args.count > 3 {
-        let typeName = args[3]
-        let hours = getIntParam("--hours") ?? 1
-        if let type = HealthTool.HealthDataType(rawValue: typeName) {
-          h.getRecentData(type: type, hours: hours)
-        } else {
-          Logger.error("Unknown type: \(typeName)")
-          h.listTypes()
-        }
-      } else {
-        printHelp(for: "health")
-      }
+      h.requestAuthorization()
 
     default: printHelp(for: nil)
     }
