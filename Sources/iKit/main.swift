@@ -9,7 +9,7 @@ import Foundation
 import IOKit
 import Photos
 import ScreenCaptureKit
-import Speech
+// import Speech  // Removed: unused in CLI context, was only used by deleted speech_recorder.swift
 import SwiftEdgeTTS
 import Vision
 
@@ -6666,18 +6666,10 @@ struct App {
         """
     case "health":
       helpText = """
-        Health: Query Apple Health data
-          types                          List all available data types
-          today <type>                   Get today's summary for a data type
-          recent <type> [--hours=N]      Get recent data (default: 1 hour)
-
-        Data types: steps, distance, activeEnergy, heartRate, restingHeartRate, bloodGlucose
-
-        Examples:
-          ikit health types
-          ikit health today steps
-          ikit health recent bloodGlucose
-          ikit health recent bloodGlucose --hours=2
+        Health: ⚠️ Not available in CLI mode
+          HealthKit requires an App Bundle with proper entitlements.
+          CLI binaries cannot receive TCC authorization prompts from macOS.
+          Use iPhone/Apple Watch Health app or a native macOS app instead.
         """
     default:
       helpText = """
@@ -6689,7 +6681,7 @@ struct App {
           calendar   — Calendar (list, create, delete)
           photos     — Photos (list, ocr, search)
           contacts   — Contacts (search)
-          health     — HealthKit data (types)
+          health     — ⚠️ Not available (requires App Bundle)
 
         Productivity:
           meet       — Meeting recording (start, transcribe, process)
