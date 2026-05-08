@@ -11,6 +11,7 @@ tmp/
 test_*.py
 test_*.sh
 !test_e2e*.sh
+!test_issue*.sh
 DEBUGGING_REPORT.md
 DECISION_LOG_*.md
 check_mps.py
