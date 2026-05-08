@@ -34,26 +34,31 @@ $ ikit transcribe
 
 | You want to... | iKit Command |
 |----------------|--------------|
-| **Search Notes** | `rg "keyword" {NOTES_DIR}/` |
+| **Search Notes** | `rg "keyword" {NOTES_DIR}/` or `ikit note search "keyword"` |
 | **Sync Notes** | `ikit note sync` |
+| **List Notes in folder** | `ikit note ls "{Folder}"` |
 | **Create Note** | `ikit note new "Folder" "Title" "Content"` |
 | **Move Note** | `notes-move "Title" "Target"` (faster) |
 | **List Tasks** | `ikit task list` |
-| **New Task** | `ikit task new "Buy milk"` |
+| **New Task** | `ikit task new "Buy milk" --due="2026-01-01 10:00"` |
 | **Complete Task** | `ikit task complete "Buy milk"` |
 | **List Calendar** | `ikit cal list` |
 | **Outlook Agenda** | `outlook calendar` / `calendar-local.py --date today` |
 | **New Event** | `ikit cal new "Meeting" "2024-01-01 10:00"` |
 | **List Photos** | `ikit photo list` |
 | **OCR Photo** | `ikit photo ocr <assetId>` |
+| **OCR Image File** | `ikit ocr <image-path>` |
 | **Search Contact** | `ikit contact search "Name"` |
+| **Health Data** | `ikit health today steps` |
 | **New Timer** | `ikit timer new --time 09:00` |
 | **List Timers** | `ikit timer list` |
-| **Transcribe Audio (中文)** | `ikit transcribe audio.mp3` |
-| **Transcribe Audio (英文)** | `ikit transcribe audio.mp3 --engine mlx` ⭐ |
-| **Record Meeting (中文)** | `ikit meet daemon ~/recordings` |
+| **Transcribe (中文)** | `ikit transcribe audio.mp3` (funasr default) |
+| **Transcribe (英文)** | `ikit meet transcribe audio.mp3 --engine mlx` ⭐ |
+| **Record Meeting** | `ikit meet daemon ~/recordings` |
 | **Record Meeting (英文)** | `ikit meet daemon ~/recordings --engine mlx` ⭐ |
 | **Text-to-Speech** | `ikit tts article.md` |
+| **System Check** | `ikit doctor` |
+| **Show Config** | `ikit config show` |
 
 ## Module: Notes (备忘录)
 
@@ -78,9 +83,21 @@ rg "keyword" {NOTES_DIR}/{Folder}/ --type md
 
 # List notes in folder
 ls {NOTES_DIR}/{Folder}/
+ikit note ls "{Folder}" --json   # CLI version with JSON output
+
+# Search via iKit CLI (supports --folder filter)
+ikit note search "keyword" --folder="{Folder}" --json
 
 # Read specific note
 cat {NOTES_DIR}/{Folder}/note-title.md
+```
+
+### Sync Notes
+
+```bash
+ikit note sync                         # Smart incremental sync
+ikit note sync --since="2026-01-01"    # Sync notes changed after date
+ikit note sync --folder="Work"         # Sync specific folder only
 ```
 
 ### Write Notes (Use iKit commands)
@@ -110,6 +127,7 @@ ikit task list --json
 
 # Create new task
 ikit task new "Buy milk"
+ikit task new "Submit report" --due="2026-01-15 10:00" --priority=1 --notes="attach PDF"
 
 # Complete task
 ikit task complete "Buy milk"
@@ -120,6 +138,13 @@ ikit task delete "Buy milk"
 # Dry-run (safety check)
 ikit task delete "Buy milk" --dry-run
 ```
+
+**Task Parameters**:
+| Parameter | Description |
+|-----------|-------------|
+| `--due="YYYY-MM-DD HH:mm"` | Due date/time |
+| `--priority=N` | Priority (1=high, 5=low) |
+| `--notes="text"` | Additional notes |
 
 ## Module: Calendar (日历)
 
@@ -211,39 +236,39 @@ ikit timer logs
 
 ## Module: Transcribe (语音转文字)
 
-iKit supports multiple ASR engines: Groq API (fast), FunASR (offline, accurate Chinese), MLX-Whisper (English), and WhisperX.
+`ikit transcribe` 支持 **groq** 和 **funasr** 两个引擎。MLX-Whisper 通过 `ikit meet transcribe` 使用。
 
 > **⚠️ Engine Selection Guide**:
-> - **中文会议** → FunASR (default)
-> - **英文会议** → MLX-Whisper (`--engine mlx`) ⭐ **推荐**
-> - **快速转录** → Groq API (`--engine groq`)
+> - **中文会议** → FunASR (`--engine funasr`, offline, default)
+> - **英文会议** → MLX-Whisper via `ikit meet transcribe --engine mlx` ⭐
+> - **快速/通用** → Groq API (`--engine groq`, cloud, 25MB limit)
 
 ```bash
-# Quick transcription (FunASR, default for Chinese)
+# Quick transcription (FunASR default for Chinese)
 ikit transcribe /tmp/recording.mp3
 
 # Specify engine
 ikit transcribe meeting.m4a --engine funasr   # Chinese, offline
-ikit transcribe meeting.m4a --engine mlx      # English, offline ⭐
-ikit transcribe meeting.m4a --engine groq     # Fast API, 25MB limit
-ikit transcribe meeting.m4a --engine whisperx # English, requires install
+ikit transcribe meeting.m4a --engine groq     # Fast cloud API, 25MB limit
 
 # Specify language
 ikit transcribe audio.wav --language zh
 ikit transcribe audio.wav --language en
 ikit transcribe audio.wav --language auto     # Auto-detect
 
+# For English with MLX-Whisper (better accuracy) — use meet transcribe
+ikit meet transcribe recording.m4a --engine mlx    # English ⭐
+
 # Output: <audio-path>.txt (same directory)
 ```
 
 **Engine Comparison**:
 
-| Engine | Language | Speed | Accuracy | Cost | File Limit |
-|--------|----------|-------|----------|------|------------|
-| **funasr** | 中文/中英 | 30x RTF | ⭐⭐⭐⭐ | Free | None |
-| **mlx** | **英文专用** | ~10x RTF | ⭐⭐⭐⭐⭐ | Free | None |
-| **whisperx** | 英文 | ~5x RTF | ⭐⭐⭐⭐⭐ | Free | None |
-| **groq** | 通用 | 54s/96min | ⭐⭐⭐ | API | 25MB |
+| Engine | Command | Language | Speed | Accuracy | Cost | Limit |
+|--------|---------|----------|-------|----------|------|-------|
+| **funasr** | `ikit transcribe` | 中文/中英 | 30x RTF | ⭐⭐⭐⭐ | Free | None |
+| **mlx** | `ikit meet transcribe` | **英文专用** | ~10x RTF | ⭐⭐⭐⭐⭐ | Free | None |
+| **groq** | `ikit transcribe` | 通用 | 54s/96min | ⭐⭐⭐ | API | 25MB |
 
 **Real-world Performance** (2026-05实测):
 | 场景 | FunASR | MLX-Whisper |
@@ -253,22 +278,19 @@ ikit transcribe audio.wav --language auto     # Auto-detect
 
 **Agent Decision Rule**:
 ```python
-# 根据会议语言选择引擎
 if meeting_language == "zh":
-    engine = "funasr"  # 默认
+    # ikit transcribe --engine funasr
 elif meeting_language == "en":
-    engine = "mlx"     # 英文专用模型
+    # ikit meet transcribe --engine mlx
 else:
-    # 不确定时先试 FunASR，检查结果
-    if english_word_ratio(transcript) > 0.3:
-        engine = "mlx"  # 重新用 MLX 转录
+    # 先用 funasr，检查英文词比例决定是否重跑 mlx
 ```
 
 **Environment**:
-- FunASR 1.3.0 + PyTorch 2.9.1
-- MLX-Whisper (Apple Silicon optimized)
+- FunASR 1.3.0 + PyTorch (check: `ikit doctor`)
+- MLX-Whisper (Apple Silicon optimized, available via `ikit meet`)
 - Python: `{FUNASR_ENV}/bin/python3`
-- Groq API Key from LiteLLM config
+- Groq API Key: LiteLLM config
 
 ## Module: TTS (文字转语音)
 
@@ -329,9 +351,92 @@ ikit tts long-article.md --streaming
   "python_path": "/usr/local/bin/python3",
   "transcribe_script": "{IKIT_DIR}/scripts/transcribe.py",
   "ollama_url": "http://localhost:11434/api/generate",
-  "ollama_model": "qwen3:4b"
+  "ollama_model": "qwen3:4b",
+  "litellm_url": "http://localhost:4444/v1/completions",
+  "litellm_model": "deepseek-v3",
+  "litellm_vision_model": "qwen-vl",
+  "litellm_api_key": "sk-...",
+  "meet": {
+    "default_mode": "both",
+    "default_interval": "15m",
+    "auto_transcribe": false,
+    "auto_summary": true
+  }
 }
 ```
+
+**Config commands**:
+```bash
+ikit config show    # Show current config
+ikit config init    # Initialize default config
+```
+
+## Module: Health (健康数据)
+
+Query Apple HealthKit data locally.
+
+```bash
+# List available data types
+ikit health types
+
+# Get today's summary
+ikit health today steps
+ikit health today heartRate
+ikit health today activeEnergy
+
+# Get recent data
+ikit health recent bloodGlucose          # Last 1 hour (default)
+ikit health recent heartRate --hours=2   # Last 2 hours
+ikit health recent steps --hours=24
+```
+
+**Available Data Types**:
+| Type | 说明 |
+|------|------|
+| `steps` | 步数 |
+| `distance` | 距离 |
+| `activeEnergy` | 活动能量 |
+| `heartRate` | 心率 |
+| `restingHeartRate` | 静息心率 |
+| `bloodGlucose` | 血糖 |
+
+> ⚠️ Requires Health data permission: System Settings > Privacy > Health
+
+## Module: OCR (图片文字识别)
+
+Two OCR pathways:
+
+```bash
+# 1. Standalone OCR from image file
+ikit ocr /path/to/screenshot.png
+ikit ocr /path/to/image.jpg
+
+# 2. OCR from Photos library (by assetId)
+ikit photo ocr <assetId>
+ikit photo ocr --screenshots --last 5   # Batch OCR last 5 screenshots
+```
+
+## System Commands
+
+```bash
+# Initialize iKit (first-time setup)
+ikit init
+
+# Show current config
+ikit config show
+
+# Initialize default config file
+ikit config init
+
+# System health check (Python, FunASR, MLX, models cache)
+ikit doctor
+```
+
+`ikit doctor` checks:
+- Python installation
+- FunASR, ModelScope, PyTorch
+- MLX-Whisper, WhisperX, pyannote
+- Model cache sizes (ModelScope + HuggingFace)
 
 ## Advanced: Meeting Recording & Transcription
 
