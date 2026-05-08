@@ -50,6 +50,7 @@ iKit ships ready-made AI agent skills for immediate use.
 
 | Skill | Path | 用途 |
 |-------|------|------|
+| **apple-kit** | `skills/apple-kit/` | iKit 全功能速查：Notes/Tasks/Calendar/Photos/Contacts/TTS/Transcribe |
 | **meeting-recorder** | `skills/meeting-recorder/` | 会议录音、转录、纪要生成、归档全流程 |
 
 ### Install a skill
