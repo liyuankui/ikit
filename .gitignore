@@ -36,3 +36,4 @@ local/
 
 # Pre-commit
 .pre-commit-cache/
+!test_agent_cli.sh

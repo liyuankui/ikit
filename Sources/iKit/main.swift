@@ -3593,7 +3593,8 @@ class RemindersTool {
   }
   func listTasks(json: Bool = false) async {
     guard await checkPermission() else {
-      Logger.error("Permission denied")
+      print("[error] Reminders access denied")
+      App.processExitCode = 1
       return
     }
     let predicate = store.predicateForReminders(in: nil)
@@ -3603,7 +3604,7 @@ class RemindersTool {
     guard let reminders = items else { return }
     let incomplete = reminders.filter { !$0.isCompleted }
     if incomplete.isEmpty {
-      Logger.info("No incomplete tasks found")
+      print("No incomplete tasks found")
       return
     }
     if json {
@@ -3620,7 +3621,7 @@ class RemindersTool {
         print(String(data: data, encoding: .utf8)!)
       }
     } else {
-      for t in incomplete { Logger.info("[\(t.calendar.title)] \(t.title ?? "")") }
+      for t in incomplete { print("[\(t.calendar.title)] \(t.title ?? "")") }
     }
   }
   func newTask(title: String, due: String? = nil, priority: Int? = nil, notes: String? = nil) async
@@ -3663,12 +3664,12 @@ class RemindersTool {
     }
 
     try? store.save(item, commit: true)
-    Logger.info("✅ Created: \(title)")
+    print("✅ Created: \(title)")
     if let due = item.dueDateComponents?.date {
-      Logger.info("   Due: \(ISO8601DateFormatter().string(from: due))")
+      print("   Due: \(ISO8601DateFormatter().string(from: due))")
     }
     if item.priority > 0 {
-      Logger.info("   Priority: \(item.priority)")
+      print("   Priority: \(item.priority)")
     }
   }
   func completeTask(query: String, isId: Bool) async {
@@ -3684,9 +3685,9 @@ class RemindersTool {
     if let t = t {
       t.isCompleted = true
       try? store.save(t, commit: true)
-      Logger.info("✅ Completed")
+      print("✅ Completed: \(t.title ?? query)")
     } else {
-      Logger.error("Not found")
+      App.agentFail("Task not found: \(query)", suggestion: "ikit task list --json")
     }
   }
   func deleteTask(query: String, isId: Bool, dryRun: Bool) async {
@@ -3699,13 +3700,13 @@ class RemindersTool {
     let t = items?.first(where: { isId ? $0.calendarItemIdentifier == query : $0.title == query })
     if let t = t {
       if dryRun {
-        Logger.info("⚠️ Dry-Run: \(t.title ?? "")")
+        print("⚠️ Dry-Run: would delete \(t.title ?? "")")
       } else {
         try? store.remove(t, commit: true)
-        Logger.info("✅ Deleted")
+        print("✅ Deleted: \(t.title ?? query)")
       }
     } else {
-      Logger.error("Not found")
+      App.agentFail("Task not found: \(query)", suggestion: "ikit task list --json")
     }
   }
 }
@@ -3725,7 +3726,8 @@ class CalendarTool {
   }
   func listEvents(json: Bool = false) async {
     guard await checkPermission() else {
-      Logger.error("Calendar access denied")
+      print("[error] Calendar access denied")
+      App.processExitCode = 1
       return
     }
     let start = Calendar.current.startOfDay(for: Date())
@@ -3733,7 +3735,7 @@ class CalendarTool {
     let events = store.events(
       matching: store.predicateForEvents(withStart: start, end: end, calendars: nil))
     if events.isEmpty {
-      Logger.info("No events found in the next 7 days")
+      print("No events found in the next 7 days")
       return
     }
     if json {
@@ -3750,12 +3752,18 @@ class CalendarTool {
     } else {
       let f = DateFormatter()
       f.dateFormat = "MM-dd HH:mm"
-      for e in events { Logger.info("[\(e.calendar.title)] \(e.startDate) \(e.title ?? "")") }
+      for e in events {
+        let f2 = DateFormatter()
+        f2.dateFormat = "MM-dd HH:mm"
+        let dateStr = e.startDate != nil ? f2.string(from: e.startDate) : "no date"
+        print("[\(e.calendar.title)] \(dateStr) \(e.title ?? "")")
+      }
     }
   }
   func newEvent(title: String, time: String) async {
     guard await checkPermission() else {
-      Logger.error("Calendar access denied")
+      print("[error] Calendar access denied")
+      App.processExitCode = 1
       return
     }
     let event = EKEvent(eventStore: store)
@@ -3767,14 +3775,15 @@ class CalendarTool {
       event.startDate = d
       event.endDate = d.addingTimeInterval(3600)
       try? store.save(event, span: .thisEvent)
-      Logger.info("✅ Created")
+      print("✅ Created: \(title)")
     } else {
-      Logger.error("Invalid Time")
+      App.agentFail("Invalid time format: \(time)", suggestion: "Use YYYY-MM-DD HH:mm")
     }
   }
   func deleteEvent(title: String) async {
     guard await checkPermission() else {
-      Logger.error("Calendar access denied")
+      print("[error] Calendar access denied")
+      App.processExitCode = 1
       return
     }
     let start = Date()
@@ -3783,9 +3792,9 @@ class CalendarTool {
       matching: store.predicateForEvents(withStart: start, end: end, calendars: nil)
     ).first(where: { $0.title == title }) {
       try? store.remove(e, span: .thisEvent)
-      Logger.info("✅ Deleted")
+      print("✅ Deleted: \(title)")
     } else {
-      Logger.error("Not found")
+      App.agentFail("Event not found: \(title)", suggestion: "ikit cal list --json")
     }
   }
 }
@@ -4251,18 +4260,18 @@ class TimerTool {
   func list() {
     let fm = FileManager.default
     guard let files = try? fm.contentsOfDirectory(atPath: launchAgentsDir) else {
-      Logger.info("No timers found (LaunchAgents directory: \(launchAgentsDir))")
+      print("No timers found")
       return
     }
 
     let timerFiles = files.filter { $0.hasPrefix("com.user.timer-") && $0.hasSuffix(".plist") }
 
     if timerFiles.isEmpty {
-      Logger.info("No timers found")
+      print("No timers found")
       return
     }
 
-    Logger.info("Active timers:")
+    print("Active timers:")
     for file in timerFiles.sorted() {
       let plistPath = URL(fileURLWithPath: launchAgentsDir).appendingPathComponent(file).path
       if let plist = NSDictionary(contentsOfFile: plistPath),
@@ -4271,7 +4280,7 @@ class TimerTool {
         // 检查任务是否已加载
         let isLoaded = isTaskLoaded(plistPath)
         let status = isLoaded ? "✅" : "❌"
-        Logger.info("  \(status) \(label)")
+        print("  \(status) \(label)")
       }
     }
   }
@@ -4291,7 +4300,7 @@ class TimerTool {
     }
 
     guard FileManager.default.fileExists(atPath: plistPath) else {
-      Logger.error("Timer not found: \(identifier)")
+      App.agentFail("Timer not found: \(identifier)", suggestion: "ikit timer list")
       return
     }
 
@@ -4301,9 +4310,9 @@ class TimerTool {
     // 删除文件
     do {
       try FileManager.default.removeItem(atPath: plistPath)
-      Logger.info("✅ Cancelled timer: \(identifier)")
+      print("✅ Cancelled timer: \(identifier)")
     } catch {
-      Logger.error("Failed to remove plist: \(error)")
+      App.agentFail("Failed to remove timer: \(error.localizedDescription)")
     }
   }
 
@@ -5550,7 +5559,28 @@ class SecretaryTool {
 
 // MARK: - Main
 struct App {
-  static let VERSION = "2.9.1"
+  static let VERSION = "2.10.0"
+
+  /// Process exit code — set by agentExit/agentFail, applied at end of main()
+  static var processExitCode: Int32 = 0
+
+  /// Exit with proper shell exit code + agent metadata footer
+  static func agentExit(_ result: String, exitCode: Int = 0, duration: TimeInterval = 0) {
+    print(result)
+    print("[exit:\(exitCode) | \(formatDuration(duration))]")
+    processExitCode = Int32(exitCode)
+  }
+
+  /// Print agent error + set exit code (does NOT terminate — use return after calling)
+  static func agentFail(_ message: String, suggestion: String? = nil, duration: TimeInterval = 0) {
+    var result = "[error] \(message)"
+    if let s = suggestion {
+      result += "\n💡 Try: \(s)"
+    }
+    print(result)
+    print("[exit:1 | \(formatDuration(duration))]")
+    processExitCode = 1
+  }
 
   static func main() async {
     let args = CommandLine.arguments
@@ -5732,8 +5762,12 @@ struct App {
         {
           print(str)
         }
+      } else if sub.isEmpty {
+        agentFail("config: missing subcommand",
+          suggestion: "ikit config init|show")
       } else {
-        print("Usage: ikit config [init|show]")
+        agentFail("config: unknown subcommand '\(sub)'",
+          suggestion: "ikit config init|show")
       }
 
     case "task":
@@ -5750,8 +5784,18 @@ struct App {
         await t.completeTask(query: args[3], isId: isId)
       } else if sub == "delete" && args.count > 3 {
         await t.deleteTask(query: args[3], isId: isId, dryRun: dryRun)
+      } else if sub == "new" {
+        agentFail("task new: missing required argument <title>",
+          suggestion: "ikit task new \"Buy milk\" --due=\"2026-01-01 10:00\"")
+      } else if sub == "complete" || sub == "delete" {
+        agentFail("task \(sub): missing required argument <query>",
+          suggestion: "ikit task \(sub) \"Task title\" [--id]")
+      } else if sub.isEmpty {
+        agentFail("task: missing subcommand",
+          suggestion: "ikit task list|new|complete|delete")
       } else {
-        printHelp(for: "task")
+        agentFail("task: unknown subcommand '\(sub)'",
+          suggestion: "ikit task list|new|complete|delete")
       }
 
     case "cal":
@@ -5762,15 +5806,32 @@ struct App {
         await t.newEvent(title: args[3], time: args[4])
       } else if sub == "delete" && args.count > 3 {
         await t.deleteEvent(title: args[3])
+      } else if sub == "new" {
+        agentFail("cal new: missing required arguments <title> <time>",
+          suggestion: "ikit cal new \"Meeting\" \"2026-01-01 10:00\"")
+      } else if sub == "delete" {
+        agentFail("cal delete: missing required argument <title>",
+          suggestion: "ikit cal delete \"Meeting\"")
+      } else if sub.isEmpty {
+        agentFail("cal: missing subcommand",
+          suggestion: "ikit cal list|new|delete")
       } else {
-        printHelp(for: "cal")
+        agentFail("cal: unknown subcommand '\(sub)'",
+          suggestion: "ikit cal list|new|delete")
       }
 
     case "contact":
       if sub == "search" && args.count > 3 {
         await ContactsTool().search(query: args[3], json: json)
+      } else if sub == "search" {
+        agentFail("contact search: missing required argument <name>",
+          suggestion: "ikit contact search \"John\"")
+      } else if sub.isEmpty {
+        agentFail("contact: missing subcommand",
+          suggestion: "ikit contact search <name>")
       } else {
-        printHelp(for: "contact")
+        agentFail("contact: unknown subcommand '\(sub)'",
+          suggestion: "ikit contact search <name>")
       }
 
     case "photo":
@@ -5784,15 +5845,20 @@ struct App {
         } else {
           await t.batchOcr(count: count, screenshots: isScreenshots, favorites: isFavorites)
         }
+      } else if sub.isEmpty {
+        agentFail("photo: missing subcommand",
+          suggestion: "ikit photo list|ocr")
       } else {
-        printHelp(for: "photo")
+        agentFail("photo: unknown subcommand '\(sub)'",
+          suggestion: "ikit photo list|ocr")
       }
 
     case "ocr":
       if args.count > 2 {
         await ocrFromPath(args[2])
       } else {
-        print("Usage: ikit ocr <image-path>")
+        agentFail("ocr: missing required argument <image-path>",
+          suggestion: "ikit ocr /path/to/screenshot.png")
       }
 
     case "sc":
@@ -5801,14 +5867,22 @@ struct App {
         t.listShortcuts()
       } else if sub == "run" && args.count > 3 {
         t.runShortcut(name: args[3], input: args.count > 4 ? args[4] : nil)
+      } else if sub == "run" {
+        agentFail("sc run: missing required argument <name>",
+          suggestion: "ikit sc run \"Shortcut Name\"")
+      } else if sub.isEmpty {
+        agentFail("sc: missing subcommand",
+          suggestion: "ikit sc list|run")
       } else {
-        printHelp(for: "sc")
+        agentFail("sc: unknown subcommand '\(sub)'",
+          suggestion: "ikit sc list|run")
       }
 
     case "note":
       let t = NotesTool()
       guard let root = getRoot() else {
-        Logger.error("Missing root")
+        agentFail("note: notes_root not configured",
+          suggestion: "ikit config init, then set notes_root in ~/.config/ikit/config.json")
         return
       }
       if sub == "sync" {
@@ -5818,10 +5892,23 @@ struct App {
       } else if sub == "ls" && args.count > 4 {
         let json = args.contains("--json")
         t.list(folder: args[4], json: json)
+      } else if sub == "ls" && args.count > 3 {
+        // User likely forgot path: ikit note ls "folder"
+        agentFail("note ls: missing path argument before folder name",
+          suggestion: "ikit note ls / \"\(args[3])\" [--json]")
+      } else if sub == "ls" {
+        agentFail("note ls: missing required arguments <path> <folder>",
+          suggestion: "ikit note ls / \"FolderName\" [--json]")
       } else if sub == "search" && args.count > 4 {
         let json = args.contains("--json")
         let folder = getStringParam("--folder")
         t.search(keyword: args[4], folder: folder, json: json)
+      } else if sub == "search" && args.count > 3 {
+        agentFail("note search: missing path argument before keyword",
+          suggestion: "ikit note search / \"\(args[3])\" [--folder=NAME]")
+      } else if sub == "search" {
+        agentFail("note search: missing required arguments <path> <keyword>",
+          suggestion: "ikit note search / \"keyword\" [--folder=NAME] [--json]")
       } else if sub == "new" && args.count > 6 {
         t.create(targetDir: root, folder: args[4], title: args[5], content: args[6])
       } else if sub == "append" && args.count > 6 {
@@ -5832,8 +5919,15 @@ struct App {
         t.delete(targetDir: root, folder: args[4], title: args[5])
       } else if sub == "move" && args.count > 6 {
         t.move(targetDir: root, sourceFolder: args[4], title: args[5], targetFolder: args[6])
+      } else if ["new", "append", "update", "delete", "move"].contains(sub) {
+        agentFail("note \(sub): missing required arguments",
+          suggestion: "ikit note --help")
+      } else if sub.isEmpty {
+        agentFail("note: missing subcommand",
+          suggestion: "ikit note sync|ls|search|new|append|update|delete|move")
       } else {
-        printHelp(for: "note")
+        agentFail("note: unknown subcommand '\(sub)'",
+          suggestion: "ikit note sync|ls|search|new|append|update|delete|move")
       }
 
     case "meet":
@@ -6032,7 +6126,8 @@ struct App {
         let files = Array(args[3..<args.count - 1])
         await t.process(files: files, outputDir: outDir)
       } else {
-        print("Usage: ikit meet [start|process|transcribe|daemon|status|stop]")
+        agentFail("meet: unknown or incomplete subcommand '\(sub)'",
+          suggestion: "ikit meet daemon|start|transcribe|process|status|stop")
       }
 
     case "timer":
@@ -6099,7 +6194,8 @@ struct App {
           message: nil
         )
       } else {
-        printHelp(for: "timer")
+        agentFail("timer: unknown subcommand '\(sub)'",
+          suggestion: "ikit timer new|resume|list|cancel|logs")
       }
 
     case "transcribe":
@@ -6108,11 +6204,9 @@ struct App {
 
       // Progressive --help: no audio file provided
       if args.count < 3 {
-        print(
-          agentError(
-            "transcribe: usage: transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]",
-            suggestion: "ikit transcribe meeting.m4a --engine groq"))
-        print("[exit:1 | 0ms]")
+        agentFail(
+          "transcribe: usage: transcribe <audio-file> [--language zh|en|auto] [--engine groq|funasr]",
+          suggestion: "ikit transcribe meeting.m4a --engine groq")
         return
       }
 
@@ -6124,8 +6218,7 @@ struct App {
           FileManager.default.fileExists(atPath: audioPath + ".m4a")
           ? "Did you mean: \(audioPath).m4a?"
           : "Check file path with: ls -l \(audioPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
-        print(agentError("Audio file not found: \(audioPath)", suggestion: suggestion))
-        print("[exit:1 | 0ms]")
+        agentFail("Audio file not found: \(audioPath)", suggestion: suggestion)
         return
       }
 
@@ -6134,8 +6227,7 @@ struct App {
 
       // Validate engine
       guard ["groq", "funasr"].contains(engine) else {
-        print(agentError("Unknown engine: \(engine)", suggestion: "Use --engine groq|funasr"))
-        print("[exit:1 | 0ms]")
+        agentFail("Unknown engine: \(engine)", suggestion: "Use --engine groq|funasr")
         return
       }
 
@@ -6150,45 +6242,38 @@ struct App {
             try text.write(toFile: outputPath, atomically: true, encoding: .utf8)
             let duration = Date().timeIntervalSince(startDate)
             print(text)
-            agentOutput("Saved to: \(outputPath)", exitCode: 0, duration: duration)
+            agentExit("Saved to: \(outputPath)", exitCode: 0, duration: duration)
           } catch {
             let duration = Date().timeIntervalSince(startDate)
-            print(
-              agentError(
-                "Failed to save: \(error.localizedDescription)",
-                suggestion:
-                  "Check directory permissions: ls -la \(outputPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))"
-              ))
-            print("[exit:1 | \(formatDuration(duration))]")
+            agentFail(
+              "Failed to save: \(error.localizedDescription)",
+              suggestion:
+                "Check directory permissions: ls -la \(outputPath.replacingOccurrences(of: "/[^/]+$", with: "", options: .regularExpression))",
+              duration: duration)
           }
         } else {
           let duration = Date().timeIntervalSince(startDate)
-          print(
-            agentError(
-              "Transcription failed",
-              suggestion: "Check GROQ_API_KEY in config or try: --engine funasr"))
-          print("[exit:1 | \(formatDuration(duration))]")
+          agentFail(
+            "Transcription failed",
+            suggestion: "Check GROQ_API_KEY in config or try: --engine funasr",
+            duration: duration)
         }
       } else {
         // Use Python script (FunASR, WhisperX, etc.)
         guard let python = configManager.current.python_path,
           let script = configManager.current.transcribe_script
         else {
-          print(
-            agentError(
-              "Python/Script path not configured",
-              suggestion: "Run: ikit config && set python_path and transcribe_script"))
-          print("[exit:1 | 0ms]")
+          agentFail(
+            "Python/Script path not configured",
+            suggestion: "Run: ikit config && set python_path and transcribe_script")
           return
         }
 
         // Bug 3 fix: validate script path exists before running (gives clear error instead of "exit 2")
         guard FileManager.default.fileExists(atPath: script) else {
-          print(
-            agentError(
-              "Transcription script not found at: \(script)",
-              suggestion: "Check transcribe_script in ~/.config/ikit/config.json"))
-          print("[exit:1 | 0ms]")
+          agentFail(
+            "Transcription script not found at: \(script)",
+            suggestion: "Check transcribe_script in ~/.config/ikit/config.json")
           return
         }
 
@@ -6218,16 +6303,15 @@ struct App {
 
         if result.exitCode == 0 {
           if FileManager.default.fileExists(atPath: out) {
-            agentOutput("Saved to: \(out)", exitCode: 0, duration: duration)
+            agentExit("Saved to: \(out)", exitCode: 0, duration: duration)
           } else {
-            agentOutput("Transcription complete", exitCode: 0, duration: duration)
+            agentExit("Transcription complete", exitCode: 0, duration: duration)
           }
         } else {
-          print(
-            agentError(
-              "Transcription failed (exit \(result.exitCode))",
-              suggestion: "Check Python script logs or try: --engine groq"))
-          print("[exit:\(result.exitCode) | \(formatDuration(duration))]")
+          agentFail(
+            "Transcription failed (exit \(result.exitCode))",
+            suggestion: "Check Python script logs or try: --engine groq",
+            duration: duration)
         }
       }
 
@@ -6238,11 +6322,9 @@ struct App {
 
       // Progressive --help: no markdown file provided
       if args.count < 3 {
-        print(
-          agentError(
-            "tts: usage: tts <markdown-file> [-o output.mp3] [--voice NAME] [--preview] [--streaming]",
-            suggestion: "ikit tts README.md -o intro.mp3 --voice zh-CN-XiaoxiaoNeural"))
-        print("[exit:1 | 0ms]")
+        agentFail(
+          "tts: usage: tts <markdown-file> [-o output.mp3] [--voice NAME] [--preview] [--streaming]",
+          suggestion: "ikit tts README.md -o intro.mp3 --voice zh-CN-XiaoxiaoNeural")
         return
       }
 
@@ -6253,18 +6335,15 @@ struct App {
         let suggestion =
           mdFile.hasSuffix(".md")
           ? "Check file path: ls -l \(mdFile)" : "Markdown files must have .md extension"
-        print(agentError("File not found: \(mdFile)", suggestion: suggestion))
-        print("[exit:1 | 0ms]")
+        agentFail("File not found: \(mdFile)", suggestion: suggestion)
         return
       }
 
       // Read and clean markdown content
       guard let content = try? String(contentsOfFile: mdFile, encoding: .utf8) else {
-        print(
-          agentError(
-            "Failed to read file: \(mdFile)",
-            suggestion: "Check file encoding (must be UTF-8) and permissions"))
-        print("[exit:1 | 0ms]")
+        agentFail(
+          "Failed to read file: \(mdFile)",
+          suggestion: "Check file encoding (must be UTF-8) and permissions")
         return
       }
 
@@ -6395,10 +6474,9 @@ struct App {
 
       if chunkFiles.isEmpty {
         let duration = Date().timeIntervalSince(startDate)
-        print(
-          agentError(
-            "No audio data generated", suggestion: "Check voice name with: ikit tts --help"))
-        print("[exit:1 | \(formatDuration(duration))]")
+        agentFail(
+          "No audio data generated", suggestion: "Check voice name with: ikit tts --help",
+          duration: duration)
         return
       }
 
@@ -6408,7 +6486,7 @@ struct App {
       }
 
       let playCmd = "mpv " + chunkFiles.map { $0.path }.joined(separator: " ")
-      agentOutput(
+      agentExit(
         "TTS: \(chunkFiles.count) files. Play: \(playCmd)", exitCode: 0,
         duration: Date().timeIntervalSince(startDate))
 
@@ -6416,7 +6494,8 @@ struct App {
       let h = HealthTool()
       h.requestAuthorization()
 
-    default: printHelp(for: nil)
+    default:
+      agentFail("unknown command: \(cmd)", suggestion: "ikit --help")
     }
   }
 
@@ -6741,3 +6820,8 @@ struct App {
 setupSignalHandlers()
 
 await App.main()
+
+// Propagate exit code to shell
+if App.processExitCode != 0 {
+  Foundation.exit(App.processExitCode)
+}
