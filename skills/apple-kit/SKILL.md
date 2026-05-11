@@ -5,7 +5,7 @@ description: Unified access to Apple ecosystem (Notes, Tasks, Calendar, Photos, 
 
 # Apple Kit
 
-**Powered by**: iKit v2.9.0 - Swift CLI for Apple Ecosystem
+**Powered by**: iKit v2.10.0 - Swift CLI for Apple Ecosystem
 **Architecture**: JSON-First, Agent-First CLI design
 
 
@@ -523,12 +523,20 @@ Add scripts to `~/bin/` or your PATH for easy access.
 
 ---
 
-**Last Updated**: 2026-05-06
-**iKit Version**: v2.8.0+ (Multi-engine support + MLX-Whisper for English meetings)
+**Last Updated**: 2026-05-11
+**iKit Version**: v2.10.0
 
 **Key Changes**:
-- ✅ Added MLX-Whisper engine for **clean English transcription**
-- ✅ Updated engine selection guide (中文 → FunASR, 英文 → MLX)
-- ✅ Agent decision rules for automatic engine selection
+- ✅ v2.10.0: Agent CLI best practices — progressive `--help`, structured exit codes, output format hints
+- ✅ v2.9.1: Meet daemon stability (Issue #20 — 5 bugs fixed):
+  - `auto_transcribe` config now properly respected by daemon
+  - Daemon no longer crashes on transcription failure (`Logger.warn` instead of `Logger.error` exit)
+  - `ikit transcribe --engine funasr` gives clear error when script file not found
+  - Pre-flight `runPreflightChecks()` validates FunASR script path exists
+  - System audio detection failure no longer kills daemon
+- ✅ v2.9.0: Multi-engine support + MLX-Whisper for English meetings
+- ✅ v2.8.0: MLX-Whisper engine for **clean English transcription**
+
+> ⚠️ **Meet Daemon**: Use `--interval=1m` or longer (minimum 1 minute enforced). `auto_transcribe` requires setting `"auto_transcribe": true` in `~/.config/ikit/config.json`.
 
 **See also**: `skills/meeting-recorder/SKILL.md` - Full meeting recording & transcription workflow
