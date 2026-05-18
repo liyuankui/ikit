@@ -857,16 +857,20 @@ class SystemRecorder: NSObject, SCStreamOutput {
     }
   }
 
-  func start(outputURL: URL) async throws {
-    // Reset state for new recording session
-    self.audioSampleCount = 0
-    self.screenFrameCount = 0
-    self.startTime = nil
-    self.recordingStartTime = nil
-    self.outputDir = outputURL.deletingLastPathComponent().path
-    self.lastScreenshotHash = ""
-    self.lastOcrText = ""
-    Logger.info("🎬 SystemRecorder: Starting...")
+  // MARK: - Persistent Stream Mode (avoids repeated permission prompts)
+  // SCStream is created once and kept alive across segments.
+  // Only the AVAssetWriter is swapped per segment.
+  private var isStreamActive = false
+
+  /// Start the SCStream capture (called once at daemon start).
+  /// This triggers the Screen Recording permission prompt only once.
+  func startCapture() async throws {
+    guard !isStreamActive else {
+      Logger.info("🎬 SystemRecorder: Stream already active, skipping startCapture")
+      return
+    }
+
+    Logger.info("🎬 SystemRecorder: Starting persistent capture stream...")
 
     let content = try await SCShareableContent.excludingDesktopWindows(
       false, onScreenWindowsOnly: true)
@@ -895,13 +899,9 @@ class SystemRecorder: NSObject, SCStreamOutput {
     // 智能捕获模式：检测到 calling app 时只捕获该应用，否则全屏
     let filter: SCContentFilter
     if !callingWindows.isEmpty {
-      // 获取 calling app 的应用对象
       let callingApps = Set(callingWindows.compactMap { $0.owningApplication })
 
-      // 创建只包含 calling app 的 filter
-      // 注意：macOS 14+ 可以直接指定要包含的应用
       if #available(macOS 14.0, *) {
-        // 使用新的 API 只捕获特定应用
         let otherApps = content.applications.filter { app in
           !callingApps.contains(where: { $0.bundleIdentifier == app.bundleIdentifier })
         }
@@ -909,23 +909,51 @@ class SystemRecorder: NSObject, SCStreamOutput {
           display: display, excludingApplications: otherApps, exceptingWindows: [])
         Logger.info("🎬 SystemRecorder: Using APP-SPECIFIC capture (only calling app audio)")
       } else {
-        // macOS 13 回退到全屏
         filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
         Logger.warn("⚠️  macOS 13 detected, falling back to FULL SCREEN capture")
       }
     } else {
-      // 没有检测到 calling app，使用全屏捕获
       filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
       Logger.info("🎬 SystemRecorder: Using FULL SCREEN capture (all apps audio included)")
     }
 
     let config = SCStreamConfiguration()
     config.capturesAudio = true
-    config.excludesCurrentProcessAudio = false  // Jeff: 改为 false 进行测试
+    config.excludesCurrentProcessAudio = false
     config.width = 1920
     config.height = 1080
     config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-    // Note: Screen capture is enabled by adding .screen stream output
+
+    stream = SCStream(filter: filter, configuration: config, delegate: nil)
+    try stream?.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global())
+    try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global())
+    Logger.info("🎬 SystemRecorder: Stream outputs added")
+
+    try await stream?.startCapture()
+    isStreamActive = true
+    Logger.info("✅ SystemRecorder: Persistent capture started (permission requested once)")
+
+    // Issue #18: Detect silent permission failure
+    Task {
+      try? await Task.sleep(nanoseconds: 5_000_000_000)
+      if self.audioSampleCount == 0 {
+        Logger.warn("⚠️  Screen Recording 权限可能未授予（5秒内0音频样本）")
+        Logger.warn("   系统音频录制已自动禁用，继续仅麦克风录音")
+        Logger.warn("   如需系统音频: System Settings → Privacy & Security → Screen Recording → 授权后重启")
+      }
+    }
+  }
+
+  /// Start writing a new segment file (called per segment).
+  /// Does NOT recreate the SCStream — no permission prompt.
+  func startSegment(outputURL: URL) throws {
+    self.audioSampleCount = 0
+    self.screenFrameCount = 0
+    self.startTime = nil
+    self.recordingStartTime = nil
+    self.outputDir = outputURL.deletingLastPathComponent().path
+    self.lastScreenshotHash = ""
+    self.lastOcrText = ""
 
     if FileManager.default.fileExists(atPath: outputURL.path) {
       try? FileManager.default.removeItem(at: outputURL)
@@ -942,41 +970,74 @@ class SystemRecorder: NSObject, SCStreamOutput {
     audioInput?.expectsMediaDataInRealTime = true
     if let input = audioInput, assetWriter?.canAdd(input) == true {
       assetWriter?.add(input)
-      Logger.info("🎬 SystemRecorder: Audio input added to writer")
-    } else {
-      Logger.warn("⚠️  Failed to add audio input to writer")
     }
 
     assetWriter?.startWriting()
-    // ⭐ 修复：立即启动 session，不等待首个样本
     assetWriter?.startSession(atSourceTime: .zero)
-    Logger.info("🎬 SystemRecorder: AssetWriter started")
-    Logger.info("🎬 SystemRecorder: Session started at kCMTimeZero")
+    Logger.info("🎬 SystemRecorder: New segment writer started → \(outputURL.lastPathComponent)")
+  }
 
-    stream = SCStream(filter: filter, configuration: config, delegate: nil)
-    try stream?.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global())
-    try stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: .global())
-    Logger.info("🎬 SystemRecorder: Stream outputs added")
+  /// Stop writing the current segment file (keeps stream alive).
+  func stopSegment() async {
+    Logger.info("🎬 SystemRecorder: Finalizing segment...")
+    audioInput?.markAsFinished()
+    Logger.info("🎵 System audio: \(audioSampleCount) samples in this segment")
 
-    try await stream?.startCapture()
-    Logger.info("✅ SystemRecorder: Capture started successfully")
+    if let writer = assetWriter {
+      writer.finishWriting(completionHandler: {})
+      let startTime = Date()
+      var attempts = 0
+      while writer.status == .writing && Date().timeIntervalSince(startTime) < 10 {
+        attempts += 1
+        if attempts % 10 == 0 {
+          Logger.debug("🎬 Still waiting... (attempt \(attempts))")
+        }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+      }
 
-    // Issue #18: Detect silent permission failure
-    // If no audio samples arrive within 5 seconds, Screen Recording permission is likely missing
-    Task {
-      try? await Task.sleep(nanoseconds: 5_000_000_000)  // 5 seconds
-      if self.audioSampleCount == 0 {
-        // Bug 5 fix: warn only — do NOT crash daemon (Logger.error calls exit())
-        Logger.warn("⚠️  Screen Recording 权限可能未授予（5秒内0音频样本）")
-        Logger.warn("   系统音频录制已自动禁用，继续仅麦克风录音")
-        Logger.warn("   如需系统音频: System Settings → Privacy & Security → Screen Recording → 授权后重启")
+      if writer.status == .completed {
+        Logger.info("✅ SystemRecorder: Segment finalized successfully")
+      } else if writer.status == .failed {
+        Logger.warn("⚠️  SystemRecorder: Segment finishWriting failed: \(writer.error?.localizedDescription ?? "unknown")")
+      } else {
+        Logger.warn("⚠️  SystemRecorder: Segment finishWriting timeout")
       }
     }
+
+    // Save screenshots metadata for this segment
+    if !screenshots.isEmpty {
+      saveMetadata()
+    }
+
+    // Clean up writer state (but NOT the stream)
+    self.assetWriter = nil
+    self.audioInput = nil
+    self.screenshots.removeAll()
+    self.ocrTasks.removeAll()
+  }
+
+  /// Stop the SCStream entirely (called once at daemon shutdown).
+  func stopCapture() async {
+    guard isStreamActive else { return }
+    Logger.info("🎬 SystemRecorder: Stopping persistent capture stream...")
+    try? await stream?.stopCapture()
+    isStreamActive = false
+    self.stream = nil
+    Logger.info("✅ SystemRecorder: Capture stream stopped")
+  }
+
+  // MARK: - Legacy API (kept for backward compatibility with non-daemon usage)
+
+  func start(outputURL: URL) async throws {
+    // For non-daemon (single recording) usage: start capture + segment together
+    try await startCapture()
+    try startSegment(outputURL: outputURL)
   }
 
   func stop() async {
     Logger.info("🎬 SystemRecorder: Stopping capture...")
     try? await stream?.stopCapture()
+    isStreamActive = false
     audioInput?.markAsFinished()
 
     Logger.info("🎬 SystemRecorder: Finalizing file...")
@@ -2112,6 +2173,17 @@ class Daemon {
     // ⭐ Store cleanup info for potential use by signal handlers
     var activeSegment: (mic: URL, sys: URL, final: URL)? = nil
 
+    // ⭐ Start persistent SCStream ONCE (only triggers permission prompt once)
+    if mode == .both || mode == .sysOnly {
+      do {
+        try await sys.startCapture()
+        Logger.info("✅ System audio capture stream started (persistent)")
+      } catch {
+        Logger.warn("⚠️  Failed to start system audio capture: \(error)")
+        Logger.warn("   Continuing with mic-only recording")
+      }
+    }
+
     while !Task.isCancelled {
       // Check for cancellation explicitly
       do {
@@ -2142,7 +2214,8 @@ class Daemon {
         mic.start(outputURL: micPath)
       }
       if mode == .both || mode == .sysOnly {
-        try? await sys.start(outputURL: sysPath)
+        // Only start a new segment writer (stream is already active)
+        try? sys.startSegment(outputURL: sysPath)
       }
 
       // Segment duration with periodic shutdown checks (1 second intervals)
@@ -2194,6 +2267,11 @@ class Daemon {
       processSegment(micPath: micPath, sysPath: sysPath, finalPath: finalPath, fm: fm)
       activeSegment = nil
     }
+
+    // ⭐ Stop persistent SCStream at daemon exit
+    if mode == .both || mode == .sysOnly {
+      await sys.stopCapture()
+    }
   }
 
   private func stopRecording() async {
@@ -2205,7 +2283,8 @@ class Daemon {
       mic.stop()
     }
     if mode == .both || mode == .sysOnly {
-      await sys.stop()
+      // Only stop the segment writer, not the stream
+      await sys.stopSegment()
     }
 
     Logger.info("💾 Recordings finalized")
