@@ -1156,8 +1156,20 @@ def main():
     else:
         logger.info("📝 Output mode: Full (with word-level timestamps)")
 
-    # 2. Determine input mode
+    # 2. Determine input mode — expand directory to individual audio files
     input_files = args.input_files
+    if len(input_files) == 1 and os.path.isdir(input_files[0]):
+        directory = input_files[0]
+        audio_exts = ('.m4a', '.wav', '.mp3', '.flac', '.ogg')
+        expanded = sorted(
+            f for f in os.listdir(directory)
+            if f.endswith(audio_exts) and '_mic' in f and os.path.getsize(os.path.join(directory, f)) > 0
+        )
+        if not expanded:
+            logger.error(f"❌ No *_mic audio files found in directory: {directory}")
+            sys.exit(1)
+        logger.info(f"📂 Directory mode: found {len(expanded)} mic files in {directory}")
+        input_files = [os.path.join(directory, f) for f in expanded]
 
     if len(input_files) == 2:
         # Dual-track mode
@@ -1234,8 +1246,45 @@ def main():
         duration = time.time() - start_run
         logger.info(f"✅ Transcription finished in {duration:.2f}s")
     else:
-        logger.error(f"Expected 1 or 2 input files, got {len(input_files)}")
-        sys.exit(1)
+        # Batch mode: multiple files (from directory expansion)
+        logger.info(f"📦 Batch mode: {len(input_files)} files")
+        failed_count = 0
+        start_load = time.time()
+        model = get_funasr_model(device=device, language=args.language) if args.engine == "funasr" else None
+        if model:
+            logger.info(f"✅ FunASR models loaded in {time.time() - start_load:.2f}s")
+
+        for input_file in input_files:
+            file_key = Path(input_file).stem
+            out_path = str(Path(input_file).with_suffix('.json'))
+            if os.path.exists(out_path):
+                logger.info(f"  ⏭️ Skip {file_key} (already transcribed)")
+                continue
+            logger.info(f"  🎤 Transcribing {file_key}...")
+            start_run = time.time()
+            try:
+                if args.engine == "funasr":
+                    res = model.generate(input=input_file, batch_size_s=300)
+                    file_result = res[0] if isinstance(res, list) and len(res) > 0 else {}
+                else:
+                    logger.error(f"Batch mode only supports funasr engine, got {args.engine}")
+                    sys.exit(1)
+                file_output = simplify_output(file_result) if use_simple else file_result
+                with open(out_path, "w", encoding="utf-8") as f:
+                    json.dump(file_output, f, ensure_ascii=False, indent=2)
+                duration = time.time() - start_run
+                logger.info(f"  ✅ {file_key} done ({duration:.1f}s)")
+            except Exception as e:
+                logger.warning(f"  ⚠️ Failed {file_key}: {e}, continuing with next file...")
+                failed_count += 1
+
+        signal.alarm(0)
+        if failed_count > 0:
+            logger.warning(f"⚠️ Batch completed with {failed_count} failures")
+        else:
+            logger.info("✅ All batch transcriptions completed")
+        cleanup_resources()
+        sys.exit(1 if failed_count == len(input_files) else 0)
 
     # Cancel timeout - transcription completed successfully
     signal.alarm(0)
