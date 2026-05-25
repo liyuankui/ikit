@@ -1,0 +1,39 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj/
+
+# Runtime / Temp files
+tmp/
+*.m4a
+*.json
+!skills/**/*.json
+*.log
+test_*.py
+test_*.sh
+!test_e2e*.sh
+!test_issue*.sh
+DEBUGGING_REPORT.md
+DECISION_LOG_*.md
+check_mps.py
+
+# User Config (should not be in repo)
+config.json
+
+# Test data and builds
+inbox/
+daemon/
+scripts/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Test scripts
+test_*.swift
+check_*.swift
+
+# Local-only files (not committed)
+local/
+
+# Pre-commit
+.pre-commit-cache/
+!test_agent_cli.sh

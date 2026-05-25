@@ -1,0 +1,28 @@
+{
+  "$schema": "../../.schema/recurrent-meetings.json",
+  "version": "1.0",
+  "meetings": [
+    {
+      "id": "weekly-standup",
+      "name": "Weekly Standup",
+      "name_zh": "周会",
+      "frequency": "weekly",
+      "day_of_week": "monday",
+      "time_range": "10:00-11:00",
+      "timezone": "UTC",
+      "description": "Weekly team standup meeting",
+      "calendar_link": "",
+      "organizer": "{Organizer Name}",
+      "default_attendees": [
+        "{Name1}",
+        "{Name2}",
+        "{Name3}"
+      ],
+      "keywords": ["standup", "weekly", "team"],
+      "intent_link": "",
+      "workspace_link": "",
+      "created_at": "2026-01-01",
+      "last_updated": "2026-01-01"
+    }
+  ]
+}
