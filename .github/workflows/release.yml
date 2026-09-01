@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: swift build -c release
+
+      - name: Ad-hoc sign (arm64)
+        run: codesign -s - --force .build/release/ikit
+
+      - name: Package
+        run: tar -czf ikit-arm64.tar.gz -C .build/release ikit
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" ikit-arm64.tar.gz \
+            --repo "${GITHUB_REPOSITORY}" \
+            --generate-notes --verify-tag
