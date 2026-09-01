@@ -71,11 +71,10 @@ Then configure `{WORKSPACE_DIR}` and `{SKILL_DIR}` placeholders in `SKILL.md`. S
 ### 安装（推荐：Homebrew tap）
 
 ```bash
-export HOMEBREW_GITHUB_API_TOKEN=$(gh auth token)  # 私有仓库下载需要
 brew tap liyuankui/tap && brew install liyuankui/tap/ikit
 ```
 
-升级：`brew upgrade liyuankui/tap/ikit`（需先 export token）
+升级：`brew upgrade liyuankui/tap/ikit`
 
 ### 编译与安装（开发模式）
 ```bash
