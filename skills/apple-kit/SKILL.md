@@ -488,10 +488,10 @@ ikit note sync
 ```bash
 # Check iKit installation
 which ikit
-# Should output: ~/.local/bin/ikit
+# Should output: /opt/homebrew/bin/ikit
 
-# If not found, check symlink
-ls -la ~/.local/bin/ikit
+# If not found, install via brew
+brew tap liyuankui/tap && brew install liyuankui/tap/ikit
 ```
 
 ### Permission denied
@@ -505,7 +505,7 @@ macOS requires permissions for:
 ## Related Documentation
 
 - **iKit README**: `iKit/README.md`
-- **iKit source**: Install path, default `~/.local/bin/ikit`
+- **iKit source**: Install path, default `/opt/homebrew/bin/ikit` (via Homebrew tap liyuankui/tap)
 - **LiteLLM config**: `~/.config/litellm/` (for Groq API key)
 
 ### iKit Helper Scripts
