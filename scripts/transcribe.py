@@ -817,14 +817,26 @@ def get_funasr_model(device="mps", language="zh"):
         )
     else:
         # Chinese model (default) - full pipeline with speaker diarization
-        model_name = "paraformer-zh"
-        logger.info(f"🇨🇳 Using Chinese Paraformer model: {model_name}")
+        # Use local cache paths when available to avoid network calls (corporate proxy SSL issue)
+        _ms_cache = os.path.expanduser("~/.cache/modelscope/hub/models/iic")
+        _local_zh = os.path.join(_ms_cache, "speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
+        _local_vad = os.path.join(_ms_cache, "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+        _local_punc = os.path.join(_ms_cache, "punc_ct-transformer_cn-en-common-vocab471067-large")
+        _local_spk = os.path.join(_ms_cache, "speech_campplus_sv_zh-cn_16k-common")
+        _use_local = all(os.path.isdir(p) for p in [_local_zh, _local_vad, _local_punc, _local_spk])
+
+        if _use_local:
+            model_name = _local_zh
+            logger.info(f"🇨🇳 Using Chinese Paraformer model (local cache): {_local_zh}")
+        else:
+            model_name = "paraformer-zh"
+            logger.info(f"🇨🇳 Using Chinese Paraformer model: {model_name}")
 
         model = AutoModel(
             model=model_name,
-            vad_model="fsmn-vad",
-            punc_model="ct-punc",
-            spk_model="cam++",
+            vad_model=_local_vad if _use_local else "fsmn-vad",
+            punc_model=_local_punc if _use_local else "ct-punc",
+            spk_model=_local_spk if _use_local else "cam++",
             device=device,
             disable_update=True,
             log_level="ERROR"
