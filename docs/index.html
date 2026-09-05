@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>iKit · Apple 生态 Agent 原生 CLI</title>
+<meta name="description" content="一个 CLI，让 AI Agent 毫秒级直读你的 Notes / Tasks / Calendar / Photos / 会议。Swift 原生，本地处理，数据不出 Mac。" />
+<style>
+  :root {
+    --accent: #0a84f0; --ink: #1d1d1f; --paper: #f5f5f7; --card: #ffffff; --line: #e3e3e8; --muted: #6e6e73;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    background: var(--paper); color: var(--ink); line-height: 1.7;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+  header { text-align: center; padding: 30px 0 10px; }
+  .logo { font-size: 64px; }
+  h1 { font-size: 34px; margin: 8px 0 4px; letter-spacing: 1px; }
+  .tag { color: var(--muted); font-size: 17px; }
+  .tag b { color: var(--ink); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 22px 26px; margin: 18px 0; }
+  .card h2 { font-size: 20px; margin-bottom: 10px; }
+  pre {
+    background: #1d1d1f; color: #b8e0ff; border-radius: 10px; padding: 14px 16px;
+    overflow-x: auto; font-size: 13.5px; position: relative;
+  }
+  .copybtn {
+    position: absolute; top: 8px; right: 8px; background: var(--accent); color: #fff;
+    border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; font-weight: 600;
+  }
+  .copybtn:hover { background: #4da3ff; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  .grid .card { margin: 0; }
+  .grid .card p { font-size: 14px; color: #515154; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding-top: 30px; }
+  footer a { color: var(--accent); text-decoration: none; margin: 0 8px; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .pill { display: inline-block; background: #dceeff; color: #0060c9; border-radius: 999px; padding: 1px 10px; font-size: 12px; margin-left: 6px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">🍎</div>
+    <h1>iKit · Apple 生态 Agent 原生 CLI</h1>
+    <p class="tag">一个 CLI，让 AI Agent <b>毫秒级直读</b>你的 Notes / Tasks / Calendar / Photos / 会议。<br/>Swift 原生，本地处理，<b>数据不出 Mac</b>。</p>
+  </header>
+
+  <div class="card">
+    <h2>安装 <span class="pill">macOS · Homebrew</span></h2>
+    <pre><button class="copybtn" data-copy="brew install liyuankui/tap/ikit" data-step="brew_install">复制</button><code>brew install liyuankui/tap/ikit</code></pre>
+    <p class="hint">装完运行 <code>ikit --version</code> 验证。也可源码安装：<code>git clone https://github.com/liyuankui/ikit.git &&amp; cd ikit &&amp; swift build -c release</code>。首次使用需在系统设置授权（Notes/日历/照片/麦克风），见 <a href="https://github.com/liyuankui/ikit/blob/master/docs/agent-install-prompt.md" target="_blank">安装引导文档</a>。</p>
+  </div>
+
+  <div class="card">
+    <h2>🤖 Paste to your agent <span class="pill">让 AI 替你装 + 学会用法</span></h2>
+    <pre><button class="copybtn" data-step="pya_copy">复制</button><code>请按这两个文档帮我安装并使用 iKit：
+1. 安装+验证+权限引导：https://raw.githubusercontent.com/liyuankui/ikit/master/docs/agent-install-prompt.md
+2. 装好后学会用（apple-kit 速查）：https://raw.githubusercontent.com/liyuankui/ikit/master/skills/apple-kit/SKILL.md</code></pre>
+    <p class="hint">粘给 ZCode / Claude / WorkBuddy 等任意 AI 助手——它会自己抓文档、brew 安装、验证版本，再<b>逐项引导你</b>开启 Notes/日历/照片/麦克风权限。</p>
+  </div>
+
+  <div class="grid">
+    <div class="card"><h2>⚡ Notes / Tasks / Calendar 毫秒读写</h2><p>基于 EventKit 直连系统数据库，无需启动 App 即可毫秒级读写备忘录、提醒事项与日历；智能增量同步 + ID 隔离，写入原子化。</p></div>
+    <div class="card"><h2>🖼 Photos 批量 OCR</h2><p>Vision 框架批量识别截图文字，支持按截图/收藏智能筛选——几千张截图秒级变成可搜索文本。</p></div>
+    <div class="card"><h2>🎙 Meet 本地转写</h2><p>麦克风+系统音频双轨录制，Aggressive Gating 消回声，说话人自动分离；FunASR 完全离线转写，零云端零泄露。</p></div>
+    <div class="card"><h2>🤖 Agent-First 设计</h2><p>JSON-First 输出、Progressive --help、错误自带 💡 Try: 自纠错建议、[exit:N | Xs] 元数据——为 Agent 消费而生。</p></div>
+    <div class="card"><h2>🧰 开箱即用 Skills</h2><p>内置 apple-kit / meeting-recorder 两个 Agent Skill，拷进 ~/.agents/skills/ 即让你的 AI 助手全功能操控 Apple 生态。</p></div>
+    <div class="card"><h2>⏰ Timer 定时任务</h2><p>LaunchAgents 定时提醒：到点打开文档/会议链接/运行命令，登录自动加载，执行可确认可留痕。</p></div>
+  </div>
+
+  <footer>
+    <a href="https://github.com/liyuankui/ikit" target="_blank">GitHub</a>·
+    <a href="https://github.com/liyuankui/ikit/releases" target="_blank">Releases</a>·
+    <a href="https://github.com/liyuankui/ikit/tree/master/skills" target="_blank">Agent Skills</a>·
+    <a href="https://github.com/liyuankui/ikit/blob/master/README.md" target="_blank">文档</a>
+    <p style="margin-top:10px">用 ❤️ 和 Swift 制成 · 2026</p>
+  </footer>
+</div>
+
+<script>
+// ── 复制按钮 ──
+document.querySelectorAll(".copybtn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const code = btn.parentElement.querySelector("code");
+    const text = btn.dataset.copy || code.textContent;
+    navigator.clipboard.writeText(text).then(() => {
+      const old = btn.textContent;
+      btn.textContent = "✅ 已复制";
+      setTimeout(() => (btn.textContent = old), 1500);
+      track("command_copy", { step: btn.dataset.step, text: text.slice(0, 120) });
+    });
+  });
+});
+document.querySelectorAll("footer a, .card a").forEach((a) => {
+  a.addEventListener("click", () => track("link_out", { target: a.href.slice(0, 120) }));
+});
+
+// ── PostHog Telemetry（遵循 POSTHOG_USAGE_GUIDE：project 属性区分项目）──
+const POSTHOG_KEY = 'phc_AbKVVXPDZKThtUacCHhFOITuBczUvLmPStN1JAZs93e';
+const POSTHOG_ENDPOINT = 'https://eu.i.posthog.com/capture/';
+const PROJECT = 'ikit';
+const UID_KEY = PROJECT + '-uid';
+
+function track(event, props = {}) {
+    if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') return;
+    try {
+        navigator.sendBeacon(POSTHOG_ENDPOINT, JSON.stringify({
+            api_key: POSTHOG_KEY,
+            event,
+            timestamp: new Date().toISOString(),
+            properties: {
+                distinct_id: localStorage.getItem(UID_KEY) || 'unknown',
+                project: PROJECT,
+                url: location.pathname,
+                page: 'index',
+                lang: 'zh',
+                ...props
+            }
+        }));
+    } catch (e) {}
+}
+
+if (!localStorage.getItem(UID_KEY)) {
+    localStorage.setItem(UID_KEY, crypto.randomUUID().slice(0, 8));
+}
+track('page_view');
+</script>
+</body>
+</html>
