@@ -4,6 +4,8 @@
 
 **Version**: v2.7.0 (Daemon Reliability)
 
+**落地页 / Landing**: https://liyuankui.github.io/ikit/
+
 ---
 
 ## 核心功能
