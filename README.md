@@ -32,14 +32,10 @@
 
 ## Paste to Your Agent
 
-```
-Install iKit: git clone https://github.com/liyuankui/ikit.git && cd iKit
-
-First install Swift: brew install swift
-
-Then build: swift build -c release && cp .build/release/ikit ~/.local/bin/
-
-Then verify: ikit --version
+```text
+请按这两个文档帮我安装并使用 iKit：
+1. 安装+验证+权限引导：https://raw.githubusercontent.com/liyuankui/ikit/master/docs/agent-install-prompt.md
+2. 装好后学会用：https://raw.githubusercontent.com/liyuankui/ikit/master/skills/apple-kit/SKILL.md
 ```
 
 ---
