@@ -5672,7 +5672,7 @@ class SecretaryTool {
 
 // MARK: - Main
 struct App {
-  static let VERSION = "2.10.1"
+  static let VERSION = "2.10.2"
 
   /// Process exit code — set by agentExit/agentFail, applied at end of main()
   static var processExitCode: Int32 = 0
