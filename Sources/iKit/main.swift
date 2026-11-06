@@ -3827,18 +3827,19 @@ class CalendarTool {
       return (try? await store.requestAccess(to: .event)) ?? false
     }
   }
-  func listEvents(json: Bool = false) async {
+  func listEvents(json: Bool = false, from: Date? = nil, to: Date? = nil) async {
     guard await checkPermission() else {
       print("[error] Calendar access denied")
       App.processExitCode = 1
       return
     }
-    let start = Calendar.current.startOfDay(for: Date())
-    let end = Calendar.current.date(byAdding: .day, value: 7, to: start)!
+    let start = from ?? Calendar.current.startOfDay(for: Date())
+    let end = to ?? Calendar.current.date(byAdding: .day, value: 7, to: start)!
     let events = store.events(
       matching: store.predicateForEvents(withStart: start, end: end, calendars: nil))
     if events.isEmpty {
-      print("No events found in the next 7 days")
+      let f = ISO8601DateFormatter()
+      print("No events found (\(f.string(from: start)) ~ \(f.string(from: end)))")
       return
     }
     if json {
@@ -3873,12 +3874,20 @@ class CalendarTool {
     event.title = title
     event.calendar = store.defaultCalendarForNewEvents
     let f = DateFormatter()
+    // 必须锁 en_US_POSIX：中文系统区域下 "yyyy-MM-dd HH:mm" 会解析出错误日期且不返回 nil（issue#23，实测落库 1220 年）
+    f.locale = Locale(identifier: "en_US_POSIX")
     f.dateFormat = "yyyy-MM-dd HH:mm"
     if let d = f.date(from: time) {
       event.startDate = d
       event.endDate = d.addingTimeInterval(3600)
-      try? store.save(event, span: .thisEvent)
-      print("✅ Created: \(title)")
+      do {
+        try store.save(event, span: .thisEvent)
+        // 写后回读校验（issue#23：✅ 不得无校验）
+        let back = f.string(from: event.startDate)
+        print("✅ Created: \(title) at \(back) (uid: \(event.eventIdentifier ?? "-"))")
+      } catch {
+        App.agentFail("Save failed: \(error.localizedDescription)", suggestion: "ikit cal list --json")
+      }
     } else {
       App.agentFail("Invalid time format: \(time)", suggestion: "Use YYYY-MM-DD HH:mm")
     }
@@ -5903,8 +5912,24 @@ struct App {
 
     case "cal":
       let t = CalendarTool()
+      // 时间范围参数（issue#23）：--from=YYYY-MM-DD --to=YYYY-MM-DD --days=N；缺省保持未来 7 天
+      let rangeFmt = DateFormatter()
+      rangeFmt.locale = Locale(identifier: "en_US_POSIX")
+      rangeFmt.dateFormat = "yyyy-MM-dd"
+      let flagFrom = args.first(where: { $0.hasPrefix("--from=") })?.dropFirst("--from=".count)
+      let flagTo = args.first(where: { $0.hasPrefix("--to=") })?.dropFirst("--to=".count)
+      let flagDays = args.first(where: { $0.hasPrefix("--days=") })?.dropFirst("--days=".count)
+      var fromDate: Date? = flagFrom.flatMap { rangeFmt.date(from: String($0)) }
+        .map { Calendar.current.startOfDay(for: $0) }
+      var toDate: Date? = flagTo.flatMap { rangeFmt.date(from: String($0)) }
+        .map { Calendar.current.date(byAdding: .day, value: 1, to: $0)! }  // to 当天含入
+      if let ds = flagDays, let n = Int(ds), n > 0 {
+        let s = fromDate ?? Calendar.current.startOfDay(for: Date())
+        fromDate = s
+        toDate = Calendar.current.date(byAdding: .day, value: n, to: s)
+      }
       if sub == "list" {
-        await t.listEvents(json: json)
+        await t.listEvents(json: json, from: fromDate, to: toDate)
       } else if sub == "new" && args.count > 4 {
         await t.newEvent(title: args[3], time: args[4])
       } else if sub == "delete" && args.count > 3 {
@@ -6802,7 +6827,9 @@ struct App {
     case "task":
       helpText =
         "Task: list [--json], new <title> [--due=\"YYYY-MM-DD HH:mm\"] [--priority=N] [--notes=\"text\"], complete <query> [--id], delete <query> [--id] [--dry-run]"
-    case "cal": helpText = "Calendar: list [--json], new <title> <YYYY-MM-DD HH:mm>, delete <title>"
+    case "cal":
+      helpText =
+        "Calendar: list [--json] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--days=N], new <title> <YYYY-MM-DD HH:mm>, delete <title>"
     case "note":
       helpText =
         "Note: sync [path] [--folder=NAME] [--since=TIME], ls [path] <folder> [--json], search [path] <keyword> [--folder=NAME] [--json], new/append/update/delete/move [path] <folder> <title> [<content>|<target-folder>]"
@@ -6890,11 +6917,12 @@ struct App {
         iKit v\(VERSION) - Apple Ecosystem CLI for Agents
 
         Apple Data:
-          notes      — Notes (sync, list, search, create, update, delete, move, read)
-          tasks      — Reminders (list, create, complete, delete)
-          calendar   — Calendar (list, create, delete)
-          photos     — Photos (list, ocr, search)
-          contacts   — Contacts (search)
+          note       — Notes (sync, list, search, create, update, delete, move, read)
+          task       — Reminders (list, new, complete, delete)
+          cal        — Calendar (list [--from/--to/--days], new, delete)
+          photo      — Photos (list, ocr, search)
+          contact    — Contacts (search)
+          sc         — Shortcuts (list, run)
           health     — ⚠️ Not available (requires App Bundle)
 
         Productivity:
