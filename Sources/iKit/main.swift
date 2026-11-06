@@ -3864,7 +3864,7 @@ class CalendarTool {
       }
     }
   }
-  func newEvent(title: String, time: String) async {
+  func newEvent(title: String, time: String, calendarName: String? = nil) async {
     guard await checkPermission() else {
       print("[error] Calendar access denied")
       App.processExitCode = 1
@@ -3872,7 +3872,8 @@ class CalendarTool {
     }
     let event = EKEvent(eventStore: store)
     event.title = title
-    event.calendar = store.defaultCalendarForNewEvents
+    event.calendar = store.calendars(for: .event).first { $0.title == calendarName }
+      ?? store.defaultCalendarForNewEvents
     let f = DateFormatter()
     // 必须锁 en_US_POSIX：中文系统区域下 "yyyy-MM-dd HH:mm" 会解析出错误日期且不返回 nil（issue#23，实测落库 1220 年）
     f.locale = Locale(identifier: "en_US_POSIX")
@@ -5928,10 +5929,11 @@ struct App {
         fromDate = s
         toDate = Calendar.current.date(byAdding: .day, value: n, to: s)
       }
+      let calFlag = args.first(where: { $0.hasPrefix("--calendar=") })?.dropFirst("--calendar=".count)
       if sub == "list" {
         await t.listEvents(json: json, from: fromDate, to: toDate)
       } else if sub == "new" && args.count > 4 {
-        await t.newEvent(title: args[3], time: args[4])
+        await t.newEvent(title: args[3], time: args[4], calendarName: calFlag.map(String.init))
       } else if sub == "delete" && args.count > 3 {
         await t.deleteEvent(title: args[3])
       } else if sub == "new" {
@@ -6829,7 +6831,7 @@ struct App {
         "Task: list [--json], new <title> [--due=\"YYYY-MM-DD HH:mm\"] [--priority=N] [--notes=\"text\"], complete <query> [--id], delete <query> [--id] [--dry-run]"
     case "cal":
       helpText =
-        "Calendar: list [--json] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--days=N], new <title> <YYYY-MM-DD HH:mm>, delete <title>"
+        "Calendar: list [--json] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--days=N], new <title> <YYYY-MM-DD HH:mm> [--calendar=NAME], delete <title>"
     case "note":
       helpText =
         "Note: sync [path] [--folder=NAME] [--since=TIME], ls [path] <folder> [--json], search [path] <keyword> [--folder=NAME] [--json], new/append/update/delete/move [path] <folder> <title> [<content>|<target-folder>]"
