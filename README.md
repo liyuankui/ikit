@@ -30,6 +30,13 @@
 - **状态管理**: `status`/`stop` 命令管理 daemon 生命周期
 - **预检查**: 启动前检查磁盘空间、FunASR 可用性、权限
 
+### ❤️ Health (恢复数据)
+- **零依赖读取**: 纯 Foundation 读 iCloud Drive 落盘 JSON，不依赖 HealthKit/签名/开发者账号（Mac 端 HealthKit 需付费账号，见 [issue #24](https://github.com/liyuankui/ikit/issues/24)）
+- **两种数据源**: Health Exporter App 快照（多日多指标）或原生快捷指令单日 JSON，按日期自动去重
+- **恢复趋势**: `health today` / `health trend --days N`（睡眠分期/HRV/静息心率/运动分钟）
+- **快照清理**: `health prune --keep N` 按类保留最新快照，其余进废纸篓
+- **依赖链与配置**: [docs/health-shortcut.md](docs/health-shortcut.md)
+
 ---
 
 ## Paste to Your Agent

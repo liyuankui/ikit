@@ -3864,7 +3864,7 @@ class CalendarTool {
       }
     }
   }
-  func newEvent(title: String, time: String, calendarName: String? = nil) async {
+  func newEvent(title: String, time: String, calendarName: String? = nil, endTime: String? = nil, durationMin: Int? = nil, location: String? = nil) async {
     guard await checkPermission() else {
       print("[error] Calendar access denied")
       App.processExitCode = 1
@@ -3872,6 +3872,7 @@ class CalendarTool {
     }
     let event = EKEvent(eventStore: store)
     event.title = title
+    if let loc = location { event.location = loc }
     event.calendar = store.calendars(for: .event).first { $0.title == calendarName }
       ?? store.defaultCalendarForNewEvents
     let f = DateFormatter()
@@ -3880,12 +3881,18 @@ class CalendarTool {
     f.dateFormat = "yyyy-MM-dd HH:mm"
     if let d = f.date(from: time) {
       event.startDate = d
-      event.endDate = d.addingTimeInterval(3600)
+      // 结束时间优先级：--end= > --duration=N（分钟）> 默认 1 小时
+      if let et = endTime, let ed = f.date(from: et) {
+        event.endDate = ed > d ? ed : d.addingTimeInterval(3600)
+      } else {
+        event.endDate = d.addingTimeInterval(TimeInterval((durationMin ?? 60) * 60))
+      }
       do {
         try store.save(event, span: .thisEvent)
-        // 写后回读校验（issue#23：✅ 不得无校验）
+        // 写后回读校验（issue#23：✅ 不得无校验）——回读含结束时间与地点，调用方可直接核对
         let back = f.string(from: event.startDate)
-        print("✅ Created: \(title) at \(back) (uid: \(event.eventIdentifier ?? "-"))")
+        let backEnd = f.string(from: event.endDate)
+        print("✅ Created: \(title) at \(back) ~ \(backEnd)\(event.location.map { " @ \($0)" } ?? "") (uid: \(event.eventIdentifier ?? "-"))")
       } catch {
         App.agentFail("Save failed: \(error.localizedDescription)", suggestion: "ikit cal list --json")
       }
@@ -4141,15 +4148,325 @@ class ShortcutsTool {
 }
 
 // MARK: - Health Tool
-// HealthKit removed: causes Signal 9 in CLI without App Bundle (issue #17)
-// HealthKit requires an App Bundle with proper entitlements for TCC authorization.
-// CLI binaries cannot receive user consent prompts from macOS.
+// HealthKit is unreachable from this CLI (issue #17: SIGKILL without an App Bundle),
+// and a host .app needs a paid developer account — free Personal Team profiles never
+// carry com.apple.developer.healthkit; launchd kills the app at spawn (error 163,
+// verified 2026-11-13 for issue #24). Data instead arrives as daily JSON drops
+// written by the iPhone shortcut into iCloud Drive → iKit/health/.
+// Shortcut steps + schema: docs/health-shortcut.md
 class HealthTool {
-  func requestAuthorization() {
-    print("❌ HealthKit is not available in CLI mode")
-    print("   HealthKit requires an App Bundle with proper entitlements.")
-    print("   CLI binaries cannot receive TCC authorization prompts from macOS.")
-    print("   Use iPhone/Apple Watch Health app or a native macOS app instead.")
+
+  struct Day {
+    let date: String
+    let file: String
+    var sleepMinutes: Double?
+    var deepMinutes: Double?
+    var remMinutes: Double?
+    var bedtime: String?
+    var wake: String?
+    var hrvAvgMs: Double?
+    var restingHr: Double?
+    var exerciseMinutes: Double?
+    var hrMin: Double?
+    var hrMax: Double?
+    var hrAvg: Double?
+    var generatedAt: String?
+  }
+
+  /// Drop directories. IKIT_HEALTH_DIR set → use it exclusively (tests, custom setups);
+  /// otherwise iCloud Drive → iKit/health (primary) + ~/.ikit/health (fallback).
+  static var searchDirs: [String] {
+    if let env = ProcessInfo.processInfo.environment["IKIT_HEALTH_DIR"], !env.isEmpty {
+      return [env]
+    }
+    return [
+      NSString(string: "~/Library/Mobile Documents/com~apple~CloudDocs/iKit/health")
+        .expandingTildeInPath as String,
+      NSString(string: "~/.ikit/health").expandingTildeInPath as String,
+    ]
+  }
+
+  private func num(_ any: Any?) -> Double? {
+    if let n = any as? NSNumber { return n.doubleValue }
+    if let s = any as? String { return Double(s) }
+    return nil
+  }
+
+  private func str(_ any: Any?) -> String? { any as? String }
+
+  /// Load every *.json drop across search dirs; same date in a later dir wins.
+  func loadDays() -> (days: [Day], errors: [String], sources: [String]) {
+    var byDate: [String: Day] = [:]
+    var errors: [String] = []
+    var sources: [String] = []
+    let fm = FileManager.default
+    for dir in Self.searchDirs {
+      guard fm.fileExists(atPath: dir) else { continue }
+      sources.append(dir)
+      guard let files = try? fm.contentsOfDirectory(atPath: dir).sorted() else { continue }
+      for f in files where f.hasSuffix(".json") {
+        let path = (dir as NSString).appendingPathComponent(f)
+        guard let data = fm.contents(atPath: path),
+          let parsed = try? JSONSerialization.jsonObject(with: data)
+        else {
+          errors.append("unreadable JSON: \(path)")
+          continue
+        }
+        // Health Exporter App 格式：{heartRateVariability: [{date,unit,value}], sleepTime: [{date,value,stages}], ...}
+        if let obj = parsed as? [String: Any],
+          ["sleepTime", "heartRateVariability", "restingHeartRate", "exerciseMinutes", "stepCount", "activeCalories"]
+            .contains(where: { obj[$0] != nil })
+        {
+          for (date, day) in parseExporterDays(obj, file: path) { byDate[date] = day }
+          continue
+        }
+        // 原生快捷指令单日 schema（docs/health-shortcut.md）；其余形状（如 workouts 导出）静默跳过
+        guard let obj = parsed as? [String: Any], let date = str(obj["date"]) else { continue }
+        let sleep = obj["sleep"] as? [String: Any]
+        let hrv = obj["hrv"] as? [String: Any]
+        let zone = obj["hr_zone"] as? [String: Any]
+        byDate[date] = Day(
+          date: date,
+          file: path,
+          sleepMinutes: num(sleep?["asleep_minutes"]) ?? num(obj["asleep_minutes"]),
+          deepMinutes: num(sleep?["deep_minutes"]),
+          remMinutes: num(sleep?["rem_minutes"]),
+          bedtime: str(sleep?["bedtime"]),
+          wake: str(sleep?["wake"]),
+          hrvAvgMs: num(hrv?["avg_ms"]) ?? num(obj["hrv_ms"]),
+          restingHr: num(obj["resting_hr"]),
+          exerciseMinutes: num((obj["exercise"] as? [String: Any])?["minutes"]),
+          hrMin: num(zone?["min"]),
+          hrMax: num(zone?["max"]),
+          hrAvg: num(zone?["avg"]),
+          generatedAt: str(obj["generated_at"])
+        )
+      }
+    }
+    return (byDate.values.sorted { $0.date > $1.date }, errors, sources)
+  }
+
+  /// Health Exporter App 落盘：一个文件含多日多指标，按 date 拆成 Day
+  private func parseExporterDays(_ obj: [String: Any], file: String) -> [String: Day] {
+    var acc: [String: (sleep: Double?, deep: Double?, rem: Double?, hrv: Double?, rhr: Double?, ex: Double?)] = [:]
+    func entries(_ key: String) -> [[String: Any]] { (obj[key] as? [[String: Any]]) ?? [] }
+    for e in entries("sleepTime") {
+      guard let d = e["date"] as? String else { continue }
+      acc[d, default: (nil, nil, nil, nil, nil, nil)].sleep = num(e["value"])
+      if let st = e["stages"] as? [String: Any] {
+        acc[d]?.deep = num(st["deep"])
+        acc[d]?.rem = num(st["rem"])
+      }
+    }
+    for e in entries("heartRateVariability") {
+      guard let d = e["date"] as? String else { continue }
+      acc[d, default: (nil, nil, nil, nil, nil, nil)].hrv = num(e["value"])
+    }
+    for e in entries("restingHeartRate") {
+      guard let d = e["date"] as? String else { continue }
+      acc[d, default: (nil, nil, nil, nil, nil, nil)].rhr = num(e["value"])
+    }
+    for e in entries("exerciseMinutes") {
+      guard let d = e["date"] as? String else { continue }
+      acc[d, default: (nil, nil, nil, nil, nil, nil)].ex = num(e["value"])
+    }
+    let generated = (obj["exportInfo"] as? [String: Any]).flatMap { $0["exportDate"] as? String }
+    var out: [String: Day] = [:]
+    for (d, t) in acc {
+      out[d] = Day(
+        date: d, file: file,
+        sleepMinutes: t.sleep, deepMinutes: t.deep, remMinutes: t.rem,
+        bedtime: nil, wake: nil,
+        hrvAvgMs: t.hrv, restingHr: t.rhr, exerciseMinutes: t.ex,
+        hrMin: nil, hrMax: nil, hrAvg: nil,
+        generatedAt: generated
+      )
+    }
+    return out
+  }
+
+  private func fmtH(_ minutes: Double?) -> String {
+    guard let m = minutes, m > 0 else { return "—" }
+    return String(format: "%.1fh", m / 60)
+  }
+
+  private func fmt0(_ v: Double?, _ suffix: String = "") -> String {
+    guard let v = v else { return "—" }
+    return String(format: "%.0f%@", v, suffix)
+  }
+
+  private func hoursValue(_ minutes: Double?) -> Double? {
+    guard let m = minutes, m > 0 else { return nil }
+    return m / 60
+  }
+
+  func run() {
+    let args = CommandLine.arguments
+    let json = args.contains("--json")
+    let sub = args.count > 2 ? args[2] : "status"
+    let (days, errors, sources) = loadDays()
+
+    if sub == "status" || sub == "--help" || sub == "-h" {
+      if sub != "status" {
+        App.agentExit(
+          """
+          Health: read iPhone shortcut drops (HR / HRV / sleep)
+
+          Usage:
+            ikit health              — status: sources, coverage, freshness
+            ikit health today        — latest day summary (—json for raw drop)
+            ikit health trend        — N-day trend table, default 7 (--days N)
+            ikit health prune        — keep newest N export snapshots, trash rest (--keep N, --dry-run)
+          Env:
+            IKIT_HEALTH_DIR          — override drop directory (tests)
+          Data source:
+            iPhone shortcut writes health-YYYY-MM-DD.json into
+            iCloud Drive → iKit/health/ (steps: docs/health-shortcut.md)
+          """)
+        return
+      }
+      var lines = ["Health status:"]
+      if sources.isEmpty {
+        lines.append("  ⚠️ no drop directory exists yet (expected iCloud Drive → iKit/health/)")
+      } else {
+        for s in sources { lines.append("  📁 \(s)") }
+        lines.append("  📄 \(days.count) day(s), latest: \(days.first?.date ?? "none")")
+      }
+      if !errors.isEmpty { lines.append("  ⚠️ \(errors.count) unreadable file(s): \(errors.joined(separator: "; "))") }
+      App.agentExit(lines.joined(separator: "\n"))
+      return
+    }
+
+    guard let latest = days.first else {
+      App.agentFail(
+        "no health drops found",
+        suggestion:
+          "run iPhone shortcut「iKit Health Export」(writes iCloud Drive/iKit/health/), see docs/health-shortcut.md"
+      )
+      return
+    }
+
+    switch sub {
+    case "today":
+      if json {
+        if let raw = FileManager.default.contents(atPath: latest.file),
+          let text = String(data: raw, encoding: .utf8)
+        {
+          print(text)
+        }
+        App.agentExit("[latest drop: \(latest.date)]", exitCode: 0)
+        return
+      }
+      var lines = ["## Health — \(latest.date)"]
+      if let bedtime = latest.bedtime, let wake = latest.wake {
+        lines.append("- 😴 \(bedtime) → \(wake), asleep \(fmtH(latest.sleepMinutes))")
+      } else {
+        lines.append("- 😴 asleep \(fmtH(latest.sleepMinutes))")
+      }
+      if latest.deepMinutes != nil || latest.remMinutes != nil {
+        lines.append("  deep \(fmtH(latest.deepMinutes)) · REM \(fmtH(latest.remMinutes))")
+      }
+      lines.append("- ❤️ resting HR \(fmt0(latest.restingHr, " bpm"))")
+      if let ex = latest.exerciseMinutes, ex > 0 { lines.append("- 🏃 exercise \(fmt0(ex, " min"))") }
+      lines.append("- 🫀 HRV \(fmt0(latest.hrvAvgMs, " ms"))")
+      if latest.hrMax != nil {
+        lines.append("  HR 24h: \(fmt0(latest.hrMin))–\(fmt0(latest.hrMax)) (avg \(fmt0(latest.hrAvg)))")
+      }
+      if let gen = latest.generatedAt { lines.append("- 📥 drop generated \(gen)") }
+      App.agentExit(lines.joined(separator: "\n"))
+    case "trend":
+      var n = 7
+      if let i = args.firstIndex(of: "--days"), i + 1 < args.count, let v = Int(args[i + 1]) {
+        n = max(1, min(365, v))
+      }
+      let window = Array(days.prefix(n))
+      if json {
+        let payload = window.map { d -> [String: Any?] in
+          [
+            "date": d.date,
+            "sleep_hours": hoursValue(d.sleepMinutes),
+            "deep_hours": hoursValue(d.deepMinutes),
+            "rem_hours": hoursValue(d.remMinutes),
+            "hrv_ms": d.hrvAvgMs,
+            "resting_hr": d.restingHr,
+            "exercise_min": d.exerciseMinutes,
+            "hr_max": d.hrMax,
+          ]
+        }
+        if let data = try? JSONSerialization.data(
+          withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
+          let text = String(data: data, encoding: .utf8)
+        {
+          print(text)
+        }
+        App.agentExit("[\(window.count) days]", exitCode: 0)
+        return
+      }
+      var lines = ["## Health trend — last \(window.count) day(s)"]
+      lines.append("")
+      lines.append("| Date | Sleep | Deep | REM | HRV ms | RHR |")
+      lines.append("|------|-------|------|-----|--------|-----|")
+      for d in window {
+        lines.append(
+          "| \(d.date) | \(fmtH(d.sleepMinutes)) | \(fmtH(d.deepMinutes)) | \(fmtH(d.remMinutes)) | \(fmt0(d.hrvAvgMs)) | \(fmt0(d.restingHr)) |"
+        )
+      }
+      let avg: (KeyPath<Day, Double?>) -> String = { kp in
+        let vals = window.compactMap { $0[keyPath: kp] }
+        guard !vals.isEmpty else { return "—" }
+        if kp == \Day.sleepMinutes || kp == \Day.deepMinutes || kp == \Day.remMinutes {
+          return String(format: "%.1fh", vals.reduce(0, +) / Double(vals.count) / 60)
+        }
+        return String(format: "%.0f", vals.reduce(0, +) / Double(vals.count))
+      }
+      lines.append("| **avg** | \(avg(\Day.sleepMinutes)) | \(avg(\Day.deepMinutes)) | \(avg(\Day.remMinutes)) | \(avg(\Day.hrvAvgMs)) | \(avg(\Day.restingHr)) |")
+      App.agentExit(lines.joined(separator: "\n"))
+    case "prune":
+      var keep = 7
+      if let i = args.firstIndex(of: "--keep"), i + 1 < args.count, let v = Int(args[i + 1]) {
+        keep = max(1, v)
+      }
+      let dryRun = args.contains("--dry-run")
+      let fm = FileManager.default
+      var kept: [String] = []
+      var trashed: [String] = []
+      var failed: [String] = []
+      for dir in Self.searchDirs where fm.fileExists(atPath: dir) {
+        guard let files = try? fm.contentsOfDirectory(atPath: dir) else { continue }
+        let snapshots = files.filter { $0.hasSuffix(".json") && $0.contains("_export_") }
+        let grouped = Dictionary(grouping: snapshots) { f -> String in
+          ["health_export_", "workouts_export_"].first(where: { f.hasPrefix($0) }) ?? "other_export_"
+        }
+        for (prefix, group) in grouped {
+          let sorted = group
+            .map { f -> (String, Date) in
+              let d = (try? fm.attributesOfItem(atPath: (dir as NSString).appendingPathComponent(f)))?[.modificationDate] as? Date
+              return (f, d ?? .distantPast)
+            }
+            .sorted { $0.1 > $1.1 }
+          for (i, item) in sorted.enumerated() {
+            let f = item.0
+            let path = (dir as NSString).appendingPathComponent(f)
+            if i < keep { kept.append(f); continue }
+            if dryRun {
+              trashed.append("[dry-run] \(f)")
+            } else if (try? fm.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: nil)) != nil {
+              trashed.append(f)
+            } else {
+              failed.append(f)
+            }
+          }
+        }
+      }
+      var lines = ["Prune export snapshots (keep newest \(keep) per type):"]
+      lines.append("  ✅ kept: \(kept.count), 🗑 trashed: \(trashed.count)\(failed.isEmpty ? "" : ", ⚠️ failed: \(failed.count)")")
+      for t in trashed { lines.append("  🗑 \(t)") }
+      for f in failed { lines.append("  ⚠️ \(f)") }
+      if dryRun { lines.append("  (dry-run — rerun without --dry-run to execute)") }
+      App.agentExit(lines.joined(separator: "\n"))
+    default:
+      App.agentFail("unknown health subcommand: \(sub)", suggestion: "ikit health --help")
+    }
   }
 }
 // MARK: - Shell Helper
@@ -5929,11 +6246,17 @@ struct App {
         fromDate = s
         toDate = Calendar.current.date(byAdding: .day, value: n, to: s)
       }
-      let calFlag = args.first(where: { $0.hasPrefix("--calendar=") })?.dropFirst("--calendar=".count)
+      let calFlag = args.first(where: { $0.hasPrefix("--calendar=") }).map { String($0.dropFirst("--calendar=".count)) }
+      let endFlag = args.first(where: { $0.hasPrefix("--end=") }).map { String($0.dropFirst("--end=".count)) }
+      let durFlag = args.first(where: { $0.hasPrefix("--duration=") }).flatMap { Int($0.dropFirst("--duration=".count)) }
+      let locFlag = args.first(where: { $0.hasPrefix("--location=") }).map { String($0.dropFirst("--location=".count)) }
       if sub == "list" {
         await t.listEvents(json: json, from: fromDate, to: toDate)
       } else if sub == "new" && args.count > 4 {
-        await t.newEvent(title: args[3], time: args[4], calendarName: calFlag.map(String.init))
+        await t.newEvent(
+          title: args[3], time: args[4], calendarName: calFlag,
+          endTime: endFlag, durationMin: durFlag,
+          location: locFlag)
       } else if sub == "delete" && args.count > 3 {
         await t.deleteEvent(title: args[3])
       } else if sub == "new" {
@@ -6621,8 +6944,7 @@ struct App {
         duration: Date().timeIntervalSince(startDate))
 
     case "health":
-      let h = HealthTool()
-      h.requestAuthorization()
+      HealthTool().run()
 
     default:
       agentFail("unknown command: \(cmd)", suggestion: "ikit --help")
@@ -6831,7 +7153,7 @@ struct App {
         "Task: list [--json], new <title> [--due=\"YYYY-MM-DD HH:mm\"] [--priority=N] [--notes=\"text\"], complete <query> [--id], delete <query> [--id] [--dry-run]"
     case "cal":
       helpText =
-        "Calendar: list [--json] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--days=N], new <title> <YYYY-MM-DD HH:mm> [--calendar=NAME], delete <title>"
+        "Calendar: list [--json] [--from=YYYY-MM-DD] [--to=YYYY-MM-DD] [--days=N], new <title> <YYYY-MM-DD HH:mm> [--end=YYYY-MM-DD HH:mm | --duration=MIN] [--location=TEXT] [--calendar=NAME], delete <title>"
     case "note":
       helpText =
         "Note: sync [path] [--folder=NAME] [--since=TIME], ls [path] <folder> [--json], search [path] <keyword> [--folder=NAME] [--json], new/append/update/delete/move [path] <folder> <title> [<content>|<target-folder>]"
@@ -6909,10 +7231,10 @@ struct App {
         """
     case "health":
       helpText = """
-        Health: ⚠️ Not available in CLI mode
-          HealthKit requires an App Bundle with proper entitlements.
-          CLI binaries cannot receive TCC authorization prompts from macOS.
-          Use iPhone/Apple Watch Health app or a native macOS app instead.
+        Health: read iPhone shortcut drops (HR / HRV / sleep)
+          ikit health              — status: sources, coverage, freshness
+          ikit health today        — latest day summary (--json for raw drop)
+          ikit health trend        — N-day trend table, default 7 (--days N)
         """
     default:
       helpText = """
@@ -6925,7 +7247,7 @@ struct App {
           photo      — Photos (list, ocr, search)
           contact    — Contacts (search)
           sc         — Shortcuts (list, run)
-          health     — ⚠️ Not available (requires App Bundle)
+          health     — Health drops from iPhone shortcut (status/today/trend)
 
         Productivity:
           meet       — Meeting recording (start, transcribe, process)
