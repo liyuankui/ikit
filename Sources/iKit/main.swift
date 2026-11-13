@@ -3900,14 +3900,15 @@ class CalendarTool {
       App.agentFail("Invalid time format: \(time)", suggestion: "Use YYYY-MM-DD HH:mm")
     }
   }
-  func deleteEvent(title: String) async {
+  func deleteEvent(title: String, from: Date? = nil, to: Date? = nil) async {
     guard await checkPermission() else {
       print("[error] Calendar access denied")
       App.processExitCode = 1
       return
     }
-    let start = Date()
-    let end = Calendar.current.date(byAdding: .day, value: 30, to: start)!
+    // 默认未来 30 天；传 --from/--to 可删任意时段（如一年后的旧重复条目）
+    let start = from ?? Date()
+    let end = to ?? Calendar.current.date(byAdding: .day, value: 30, to: start)!
     if let e = store.events(
       matching: store.predicateForEvents(withStart: start, end: end, calendars: nil)
     ).first(where: { $0.title == title }) {
@@ -6258,7 +6259,7 @@ struct App {
           endTime: endFlag, durationMin: durFlag,
           location: locFlag)
       } else if sub == "delete" && args.count > 3 {
-        await t.deleteEvent(title: args[3])
+        await t.deleteEvent(title: args[3], from: fromDate, to: toDate)
       } else if sub == "new" {
         agentFail("cal new: missing required arguments <title> <time>",
           suggestion: "ikit cal new \"Meeting\" \"2026-01-01 10:00\"")
