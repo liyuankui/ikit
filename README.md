@@ -37,6 +37,22 @@
 - **快照清理**: `health prune --keep N` 按类保留最新快照，其余进废纸篓
 - **依赖链与配置**: [docs/health-shortcut.md](docs/health-shortcut.md)
 
+### 🔔 Notify (推送到 iPhone)
+- **Bark 通道**: App Store 免费 Bark App，APNs 秒推；支持 AES-128-CBC 端到端加密（`bark_crypt_key`，服务器零可见明文）· **配置与加密细节：[docs/notify-bark.md](docs/notify-bark.md)**
+- **五套场景模板** `--tpl`（flag 可覆盖任何字段）：
+
+| 模板 | 场景 | 行为 |
+|------|------|------|
+| `done`（默认） | 任务完成 | 亮屏轻提醒，留档 |
+| `fail` | 失败/需人工 | 时效性通知（专注模式也显示），铃声 bell |
+| `digest` | 例行简报 | passive 静默进列表，不亮屏，留档可翻 |
+| `urgent` | 紧急 | critical 穿透静音（需 App 授权「重要警告」） |
+| `action` | 需点击处理 | 配 `--url` 跳转 / `--copy` 一键复制 |
+
+- **示例**: `ikit notify "转录完成" "meet-11-14.md 已落盘" --tpl done`；`ikit notify --tpl digest "晨报已生成" "❤️ HRV 33ms"`
+- **覆盖参数**: `--level/--sound/--group/--subtitle/--url/--copy/--icon/--volume/--markdown/--no-archive`（全参数：[bark.day.app/#/params](https://bark.day.app/#/params)）
+- **配置**: `ikit config set bark_key <key>`（Bark App 首页复制）；`bark_crypt_key`（16 字符，需与 App 内推送加密设置一致）；`bark_server`（可自托管）；环境变量 `IKIT_BARK_KEY` 临时覆盖
+
 ---
 
 ## Paste to Your Agent
