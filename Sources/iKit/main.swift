@@ -1,6 +1,7 @@
 import AVFoundation
 import AudioToolbox
 import Cocoa
+import CommonCrypto
 import Contacts
 import Darwin
 import EventKit
@@ -489,6 +490,9 @@ struct Config: Codable {
   var screenshot_interval: Double?
   var auto_ocr: Bool?
   var summary_max_images: Int?
+  var bark_key: String?  // Bark App device key (Mac → iPhone push)
+  var bark_server: String?  // default https://api.day.app; self-hosted: https://<host>
+  var bark_crypt_key: String?  // 16-char AES-128 key; must match Bark App encryption setting
   var meet: MeetConfig?  // Meet daemon configuration
 }
 
@@ -510,6 +514,9 @@ class ConfigManager {
       screenshot_interval: 10.0,
       auto_ocr: false,  // Default: disabled to prevent CPU spikes
       summary_max_images: 3,  // Default: max 3 images for summary
+      bark_key: nil,
+      bark_server: nil,
+      bark_crypt_key: nil,
       meet: MeetConfig(
         default_interval: "15m",
         default_mode: "both",
@@ -4470,6 +4477,191 @@ class HealthTool {
     }
   }
 }
+
+// MARK: - Notify Tool
+// Mac → iPhone push via Bark (App Store 免费 App，APNs 秒推；服务器可自托管)。
+// 配置：iPhone 装 Bark → 复制 key → `ikit config set bark_key <key>`；
+// 自托管：`ikit config set bark_server https://<host>`；CI/临时用 IKIT_BARK_KEY 环境变量覆盖。
+class NotifyTool {
+  /// 消息模板：场景化预设（level/sound/group/isArchive），命令行 flag 可覆盖
+  /// 参数语义见 https://bark.day.app/#/params
+  static let templates: [String: [String: Any]] = [
+    // 任务完成（默认）：亮屏轻提醒，留档可查
+    "done": ["level": "active", "sound": "calm", "group": "iKit", "isArchive": 1],
+    // 任务失败/需人工介入：时效性通知，专注模式也能显示
+    "fail": ["level": "timeSensitive", "sound": "bell", "group": "iKit-fail", "isArchive": 1, "subtitle": "需处理"],
+    // 例行简报（晨报/日报）：静默进列表，不亮屏不打扰，App 内可翻
+    "digest": ["level": "passive", "group": "iKit-digest", "isArchive": 1, "subtitle": "例行"],
+    // 紧急（数据断流/关键流程挂了）：重要警告，穿透静音（App 内需授权「重要警告」）
+    "urgent": ["level": "critical", "sound": "alert", "group": "iKit-urgent", "isArchive": 1, "volume": 5],
+    // 需要用户点一下处理：可带 --url 跳转 / --copy 一键复制
+    "action": ["level": "active", "sound": "minuet", "group": "iKit"],
+  ]
+
+  func run() {
+    let args = CommandLine.arguments
+    var tpl = "done"
+    var overrides: [String: Any] = [:]
+    var markdownFlag = false
+    var positional: [String] = []
+    var i = 2
+    while i < args.count {
+      let a = args[i]
+      func next() -> String? { i + 1 < args.count ? args[i + 1] : nil }
+      switch a {
+      case "--tpl":
+        guard let v = next() else {
+          App.agentFail("notify: --tpl 缺参数值", suggestion: "done | fail | digest | urgent | action")
+          return
+        }
+        tpl = v
+        i += 2
+      case "--level", "--sound", "--group", "--subtitle", "--url", "--copy", "--icon", "--volume":
+        guard let v = next() else {
+          App.agentFail("notify: \(a) 缺参数值", suggestion: "ikit notify \"标题\" \"内容\" [--tpl done|fail|digest|urgent|action] [--level active|timeSensitive|passive|critical] [--sound 铃声] [--group 组] [--url 链接] [--copy 复制内容] [--icon 图标URL] [--markdown] [--no-archive]")
+          return
+        }
+        let key = String(a.dropFirst(2))
+        overrides[key] = v
+        i += 2
+      case "--markdown":
+        markdownFlag = true
+        i += 1
+      case "--no-archive":
+        overrides["isArchive"] = 0
+        i += 1
+      default:
+        positional.append(a)
+        i += 1
+      }
+    }
+
+    guard let title = positional.first, !title.isEmpty else {
+      App.agentFail(
+        "notify: missing title",
+        suggestion:
+          "ikit notify \"标题\" \"内容\" [--tpl done|fail|digest|urgent|action]；模板说明见 ikit notify --help"
+      )
+      return
+    }
+    let body = positional.dropFirst().joined(separator: " ")
+
+    guard var payload = Self.templates[tpl] else {
+      App.agentFail("notify: 未知模板 '\(tpl)'", suggestion: "可选：done | fail | digest | urgent | action")
+      return
+    }
+    if let lv = overrides["level"] as? String,
+      !["active", "timeSensitive", "passive", "critical"].contains(lv)
+    {
+      App.agentFail("notify: level 无效 '\(lv)'", suggestion: "active | timeSensitive | passive | critical")
+      return
+    }
+    for (k, v) in overrides { payload[k] = v }
+    payload["title"] = title
+    if !body.isEmpty { payload[markdownFlag ? "markdown" : "body"] = body }
+    let env = ProcessInfo.processInfo.environment
+    let key =
+      env["IKIT_BARK_KEY"] ?? env["BARK_KEY"] ?? ConfigManager.shared.current.bark_key
+    guard let key = key, !key.isEmpty else {
+      App.agentFail(
+        "bark_key 未配置",
+        suggestion: "iPhone 装 Bark App（免费）→ 首页复制 key → ikit config set bark_key <key>"
+      )
+      return
+    }
+    let server = (ConfigManager.shared.current.bark_server ?? "https://api.day.app")
+      .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    var req = URLRequest(url: URL(string: "\(server)/") ?? URL(fileURLWithPath: "/dev/null"))
+    req.timeoutInterval = 10
+
+    if let cryptKey = ConfigManager.shared.current.bark_crypt_key, cryptKey.count == 16 {
+      // 加密模式（Bark 官方方案）：AES-128-CBC，key=配置的 16 字符（其 ASCII 字节即密钥）。
+      // ⚠️ IV 协议格式：16 个 ASCII 字符的字符串，其 ASCII 字节直接作为 IV（非 hex 解码）——
+      // 官方示例 curl 原样传 iv='f3d43c0fa9086e1d' 且 openssl 用 xxd 后的它，故生成 [0-9a-f]{16}。
+      let hexChars = Array("0123456789abcdef")
+      let ivStr = String((0..<16).map { _ in hexChars.randomElement()! })
+      guard let plain = try? JSONSerialization.data(withJSONObject: payload),
+        let cipher = Self.aesCBCEncrypt(
+          data: plain, key: Data(cryptKey.utf8), iv: Data(ivStr.utf8)),
+        let url = URL(string: "\(server)/\(key)")
+      else {
+        App.agentFail("加密推送准备失败（key 长度须 16 / URL 无效）", suggestion: "ikit config set bark_crypt_key <16字符>")
+        return
+      }
+      func formEncode(_ s: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-_.*")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+      }
+      let b64 = cipher.base64EncodedString()
+      req.url = url
+      req.httpMethod = "POST"
+      req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+      req.httpBody = "ciphertext=\(formEncode(b64))&iv=\(ivStr)".data(using: .utf8)
+    } else {
+      // 明文模式：JSON POST /push
+      guard let url = URL(string: "\(server)/push") else {
+        App.agentFail(
+          "bark_server 无效: \(server)",
+          suggestion: "ikit config set bark_server https://api.day.app")
+        return
+      }
+      req.url = url
+      req.httpMethod = "POST"
+      req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+      var pd = payload
+      pd["device_key"] = key
+      req.httpBody = try? JSONSerialization.data(withJSONObject: pd)
+    }
+
+    var ok = false
+    var detail = ""
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { data, resp, err in
+      defer { sem.signal() }
+      if let err = err {
+        detail = err.localizedDescription
+        return
+      }
+      guard let data = data,
+        let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+      else {
+        detail = "unreadable response (HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1))"
+        return
+      }
+      ok = (obj["code"] as? Int) == 200
+      detail = (obj["message"] as? String) ?? "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? -1)"
+    }.resume()
+    _ = sem.wait(timeout: .now() + 15)
+
+    if ok {
+      App.agentExit("✅ pushed: \(title)")
+    } else {
+      App.agentFail(
+        "push failed: \(detail.isEmpty ? "timeout" : detail)",
+        suggestion: "检查 bark_key 是否最新（Bark App 重装会换 key）/ 网络；服务器 \(server)"
+      )
+    }
+  }
+
+  /// AES-128-CBC + PKCS7（CommonCrypto），Bark 加密推送用
+  static func aesCBCEncrypt(data: Data, key: Data, iv: Data) -> Data? {
+    guard key.count == kCCKeySizeAES128, iv.count == kCCBlockSizeAES128 else { return nil }
+    var keyBytes = [UInt8](key)
+    var ivBytes = [UInt8](iv)
+    var dataBytes = [UInt8](data)
+    var outBytes = [UInt8](repeating: 0, count: dataBytes.count + kCCBlockSizeAES128)
+    var outLen = 0
+    let status = CCCrypt(
+      CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES128),
+      CCOptions(kCCOptionPKCS7Padding),
+      &keyBytes, keyBytes.count, &ivBytes,
+      &dataBytes, dataBytes.count,
+      &outBytes, outBytes.count, &outLen)
+    guard status == kCCSuccess else { return nil }
+    return Data(outBytes.prefix(outLen))
+  }
+}
 // MARK: - Shell Helper
 class Shell {
   static func run(_ command: String, args: [String]) -> (
@@ -5990,7 +6182,7 @@ class SecretaryTool {
 
 // MARK: - Main
 struct App {
-  static let VERSION = "2.10.3"
+  static let VERSION = "2.11.0"
 
   /// Process exit code — set by agentExit/agentFail, applied at end of main()
   static var processExitCode: Int32 = 0
@@ -6193,13 +6385,34 @@ struct App {
         {
           print(str)
         }
+      } else if sub == "set" && args.count > 4 {
+        let key = args[3]
+        let value = args[4]
+        switch key {
+        case "bark_key": configManager.current.bark_key = value
+        case "bark_server": configManager.current.bark_server = value
+        case "bark_crypt_key":
+          guard value.count == 16 else {
+            agentFail("bark_crypt_key 必须恰好 16 字符（AES-128）", suggestion: "当前 \(value.count) 字符")
+            return
+          }
+          configManager.current.bark_crypt_key = value
+        default:
+          agentFail("config set: unknown key '\(key)'", suggestion: "可设键：bark_key, bark_server")
+          return
+        }
+        configManager.save()
+        agentExit("✅ \(key) saved")
       } else if sub.isEmpty {
         agentFail("config: missing subcommand",
-          suggestion: "ikit config init|show")
+          suggestion: "ikit config init|show|set")
       } else {
         agentFail("config: unknown subcommand '\(sub)'",
-          suggestion: "ikit config init|show")
+          suggestion: "ikit config init|show|set")
       }
+
+    case "notify":
+      NotifyTool().run()
 
     case "task":
       let t = RemindersTool()
@@ -7237,6 +7450,25 @@ struct App {
           ikit health today        — latest day summary (--json for raw drop)
           ikit health trend        — N-day trend table, default 7 (--days N)
         """
+    case "notify":
+      helpText = """
+        Notify: push to iPhone via Bark (Mac → iPhone)
+
+        Templates (--tpl, defaults to done):
+          done     — 任务完成：亮屏轻提醒，留档（默认）
+          fail     — 失败/需人工：时效性通知，专注模式也显示，铃声 bell
+          digest   — 例行简报：passive 静默进列表，不亮屏，留档可翻
+          urgent   — 紧急：critical 穿透静音（App 内需授权「重要警告」），音量 5
+          action   — 需点击处理：配合 --url 跳转或 --copy 一键复制
+
+        Usage:
+          ikit notify "标题" "内容" [--tpl done|fail|digest|urgent|action]
+        Overrides: --level active|timeSensitive|passive|critical, --sound NAME,
+          --group NAME, --subtitle TEXT, --url LINK, --copy TEXT, --icon URL,
+          --volume 0-10, --markdown (正文按 Markdown 渲染), --no-archive
+        Config: bark_key / bark_crypt_key(16字符加密) / bark_server
+        Full params: https://bark.day.app/#/params
+        """
     default:
       helpText = """
         iKit v\(VERSION) - Apple Ecosystem CLI for Agents
@@ -7249,6 +7481,7 @@ struct App {
           contact    — Contacts (search)
           sc         — Shortcuts (list, run)
           health     — Health drops from iPhone shortcut (status/today/trend)
+          notify     — Push to iPhone via Bark (templates: done/fail/digest/urgent/action)
 
         Productivity:
           meet       — Meeting recording (start, transcribe, process)
