@@ -31,16 +31,16 @@ Apple Watch → iPhone 健康 → 快捷指令「iKit Health Export」（每日 
 
 ```json
 {
-  "date": "2026-11-13",
-  "generated_at": "2026-11-13T06:05:00+08:00",
+  "date": "2026-01-02",
+  "generated_at": "2026-01-02T07:00:00+08:00",
   "sleep": {
-    "asleep_minutes": 435,
-    "deep_minutes": 95,
-    "rem_minutes": 90,
+    "asleep_minutes": 480,
+    "deep_minutes": 90,
+    "rem_minutes": 100,
     "bedtime": "2026-01-01 23:30",
     "wake": "2026-01-02 07:00"
   },
-  "hrv": { "avg_ms": 48, "samples": 6 },
+  "hrv": { "avg_ms": 45, "samples": 6 },
   "resting_hr": 55,
   "hr_zone": { "min": 50, "max": 160, "avg": 70 }
 }

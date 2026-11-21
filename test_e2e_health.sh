@@ -77,12 +77,12 @@ test_output "Health: trend --json returns array" "${IKIT_BIN} health trend --jso
 
 # --- Exporter App 格式 fixture（多日多指标 + workouts 干扰文件）---
 cat > "${FIXTURE_DIR}/health_export_1700000000_TEST01.json" <<'JSON'
-{"exportInfo":{"appVersion":"1.7.0","exportDate":"2026-01-02T00:00:00Z"},"sleepTime":[{"date":"2026-11-10","unit":"min","value":400.0,"stages":{"deep":50.0,"rem":90.0}},{"date":"2026-11-11","unit":"min","value":350.0,"stages":{"deep":55.0,"rem":85.0}}],"heartRateVariability":[{"date":"2026-11-10","unit":"ms","value":30},{"date":"2026-11-11","unit":"ms","value":45}],"restingHeartRate":[{"date":"2026-11-10","unit":"bpm","value":55},{"date":"2026-11-11","unit":"bpm","value":50}],"exerciseMinutes":[{"date":"2026-11-10","unit":"min","value":2}]}
+{"exportInfo":{"appVersion":"1.7.0","exportDate":"2026-01-02T00:00:00Z"},"sleepTime":[{"date":"2026-11-10","unit":"min","value":400.0,"stages":{"deep":50.0,"rem":90.0}},{"date":"2026-11-11","unit":"min","value":350.0,"stages":{"deep":55.0,"rem":85.0}}],"heartRateVariability":[{"date":"2026-11-10","unit":"ms","value":30},{"date":"2026-11-11","unit":"ms","value":45}],"restingHeartRate":[{"date":"2026-11-10","unit":"bpm","value":55},{"date":"2026-11-11","unit":"bpm","value":50}],"exerciseMinutes":[{"date":"2026-11-10","unit":"min","value":30}]}
 JSON
 echo '{"exportInfo":{"appVersion":"1.7.0"},"workouts":[{"activity":"badminton"}]}' > "${FIXTURE_DIR}/workouts_export_TEST.json"
 
 test_output "Health: exporter-format days parsed" "${IKIT_BIN} health trend" "| 2026-11-11 | 5.8h"
-test_output "Health: exporter days in trend (deep stage)" "${IKIT_BIN} health trend" "| 2026-11-10 | 6.8h | 0.9h"
+test_output "Health: exporter days in trend (deep stage)" "${IKIT_BIN} health trend" "| 2026-11-10 | 6.7h | 0.8h"
 test_output "Health: workouts file skipped silently" "${IKIT_BIN} health status" "1 unreadable"
 
 test_output "Health: unknown subcommand fails cleanly" "${IKIT_BIN} health foo" "unknown health subcommand"
